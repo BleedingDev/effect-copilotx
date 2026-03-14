@@ -15,6 +15,7 @@ import { ProxyRuntimeService } from "#/services/proxy-runtime-service";
 export interface ServerListenOptions {
   readonly host: string;
   readonly port: number;
+  readonly portExplicit?: boolean;
 }
 
 const routeLayers = Layer.mergeAll(

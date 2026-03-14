@@ -15,6 +15,16 @@ import type { AccountSummary } from "#/domain/accounts/account-types";
 import { runServer } from "#/http/server-runner";
 import { AccountRepository } from "#/services/account-repository";
 import {
+  buildClaudeCodeEnv,
+  extractModelIdsFromOpenAiList,
+  primaryModelPreferences,
+  readProjectApiKey,
+  resolveClaudeBaseUrl,
+  selectPreferredModel,
+  smallModelPreferences,
+  writeClaudeCodeSettings,
+} from "#/services/claude-code-config";
+import {
   formatImportedAccount,
   importGitHubToken,
   requestDeviceLogin,
@@ -31,14 +41,24 @@ import {
   fetchPremiumRequestUsageStatus,
 } from "#/services/premium-request-usage";
 import { ProxyRuntimeService } from "#/services/proxy-runtime-service";
+import { readServerInfo } from "#/services/server-discovery";
 
 interface ServeOptions {
   readonly host: string;
   readonly port: number;
+  readonly portExplicit: boolean;
 }
 
 interface AuthLoginOptions {
   readonly githubToken: string | undefined;
+}
+
+interface ConfigOptions {
+  readonly apiKey: string | undefined;
+  readonly baseUrl: string | undefined;
+  readonly model: string | undefined;
+  readonly smallModel: string | undefined;
+  readonly target: string;
 }
 
 interface StatusRow {
@@ -71,14 +91,17 @@ Usage:
   copilotx --version
   copilotx serve [--host HOST] [--port PORT]
   copilotx status
+  copilotx models
   copilotx auth login [--token TOKEN]
   copilotx auth status
-  copilotx models
+  copilotx auth logout
+  copilotx config claude-code [--base-url URL] [--api-key KEY] [--model ID] [--small-model ID]
 `;
 
 const parseServeOptions = (args: readonly string[]): ServeOptions => {
   let host = DEFAULT_HOST;
   let port = DEFAULT_PORT;
+  let portExplicit = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -99,21 +122,20 @@ const parseServeOptions = (args: readonly string[]): ServeOptions => {
       }
 
       const parsedPort = Number(nextArg);
-      if (
-        !Number.isInteger(parsedPort) ||
-        parsedPort <= 0 ||
-        parsedPort > 65_535
-      ) {
+      if (!Number.isInteger(parsedPort) || parsedPort <= 0 || parsedPort > 65_535) {
         throw new Error(`Invalid port: ${nextArg}`);
       }
 
       port = parsedPort;
+      portExplicit = true;
       index += 1;
       continue;
     }
+
+    throw new Error(`Unknown serve option: ${arg}`);
   }
 
-  return { host, port };
+  return { host, port, portExplicit };
 };
 
 const parseAuthLoginOptions = (args: readonly string[]): AuthLoginOptions => {
@@ -137,6 +159,63 @@ const parseAuthLoginOptions = (args: readonly string[]): AuthLoginOptions => {
   }
 
   return { githubToken };
+};
+
+const parseConfigOptions = (args: readonly string[]): ConfigOptions => {
+  const [target, ...rest] = args;
+  if (target === undefined || target.trim().length === 0) {
+    throw new Error("Missing config target.");
+  }
+
+  let apiKey: string | undefined;
+  let baseUrl: string | undefined;
+  let model: string | undefined;
+  let smallModel: string | undefined;
+
+  for (let index = 0; index < rest.length; index += 1) {
+    const arg = rest[index];
+    const nextArg = rest[index + 1];
+
+    if (arg === "--base-url" || arg === "-u") {
+      if (nextArg === undefined || nextArg.trim().length === 0) {
+        throw new Error("Missing value for --base-url");
+      }
+      baseUrl = nextArg.trim();
+      index += 1;
+      continue;
+    }
+
+    if (arg === "--api-key" || arg === "-k") {
+      if (nextArg === undefined || nextArg.trim().length === 0) {
+        throw new Error("Missing value for --api-key");
+      }
+      apiKey = nextArg.trim();
+      index += 1;
+      continue;
+    }
+
+    if (arg === "--model" || arg === "-m") {
+      if (nextArg === undefined || nextArg.trim().length === 0) {
+        throw new Error("Missing value for --model");
+      }
+      model = nextArg.trim();
+      index += 1;
+      continue;
+    }
+
+    if (arg === "--small-model" || arg === "-s") {
+      if (nextArg === undefined || nextArg.trim().length === 0) {
+        throw new Error("Missing value for --small-model");
+      }
+      smallModel = nextArg.trim();
+      index += 1;
+      continue;
+    }
+
+    throw new Error(`Unknown config option: ${arg}`);
+  }
+
+  return { apiKey, baseUrl, model, smallModel, target: target.trim() };
 };
 
 
@@ -434,6 +513,132 @@ const runAuthLoginCommand = (options: AuthLoginOptions) =>
   );
 
 
+const logoutLive = Layer.mergeAll(AccountRepository.Default);
+
+const runAuthLogoutCommand = Effect.gen(function* runAuthLogoutCommand() {
+  const repository = yield* AccountRepository;
+  const accounts = yield* repository.listAccounts();
+
+  if (accounts.length === 0) {
+    return yield* Console.log("No credentials found.");
+  }
+
+  yield* Effect.forEach(accounts, (account) => repository.deleteAccount(account.accountId), {
+    concurrency: 1,
+    discard: true,
+  });
+
+  return yield* Console.log(
+    accounts.length === 1
+      ? "Credentials removed."
+      : `Removed ${accounts.length} accounts.`
+  );
+}).pipe(
+  Effect.catch((error) => failCli(describeUnknownError(error))),
+  Effect.provide(logoutLive)
+);
+
+const fetchRemoteModelIds = async (
+  baseUrl: string,
+  apiKey: string | undefined
+): Promise<readonly string[]> => {
+  const headers = new Headers({ Accept: "application/json" });
+  if (apiKey !== undefined && apiKey.length > 0) {
+    headers.set("Authorization", `Bearer ${apiKey}`);
+  }
+
+  const response = await fetch(new URL("/v1/models", baseUrl), {
+    headers,
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) {
+    throw new Error(`Model discovery failed with status ${response.status}.`);
+  }
+
+  return extractModelIdsFromOpenAiList(await response.json());
+};
+
+const runConfigCommand = (options: ConfigOptions) =>
+  Effect.gen(function* runConfigCommand() {
+    if (options.target !== "claude-code") {
+      return yield* failCli(
+        `Unknown config target: ${options.target}\n\nAvailable targets: claude-code`
+      );
+    }
+
+    const discoveredServer = yield* Effect.tryPromise({
+      try: async () => readServerInfo(),
+      catch: (error) => new Error(describeUnknownError(error), { cause: error }),
+    }).pipe(Effect.catch(() => Effect.succeed(null)));
+
+    const baseUrl = resolveClaudeBaseUrl(options.baseUrl, discoveredServer);
+    const isRemote = options.baseUrl !== undefined;
+    const apiKey =
+      options.apiKey?.trim() ||
+      (yield* Effect.tryPromise({
+        try: async () => readProjectApiKey(),
+        catch: (error) => new Error(describeUnknownError(error), { cause: error }),
+      }).pipe(Effect.catch(() => Effect.succeed(undefined))));
+
+    if (isRemote && (apiKey === undefined || apiKey.length === 0)) {
+      return yield* failCli(
+        "Remote mode requires --api-key or COPILOTX_API_KEY in the current environment or .env file."
+      );
+    }
+
+    const needsModelDiscovery =
+      options.model === undefined || options.smallModel === undefined;
+    const modelIds = needsModelDiscovery
+      ? yield* Effect.tryPromise({
+          try: async () => fetchRemoteModelIds(baseUrl, apiKey),
+          catch: (error) => new Error(describeUnknownError(error), { cause: error }),
+        }).pipe(Effect.catch(() => Effect.succeed([] as readonly string[])))
+      : [];
+
+    const primaryModel =
+      options.model?.trim() ||
+      selectPreferredModel(modelIds, primaryModelPreferences, "gpt-4o");
+    const smallModel =
+      options.smallModel?.trim() ||
+      selectPreferredModel(modelIds, smallModelPreferences, "gpt-5-mini");
+    const authToken = apiKey ?? "copilotx";
+    const envConfig = buildClaudeCodeEnv({
+      apiKey: authToken,
+      baseUrl,
+      model: primaryModel,
+      smallModel,
+    });
+    const configPath = yield* Effect.tryPromise({
+      try: async () =>
+        writeClaudeCodeSettings({
+          apiKey: authToken,
+          baseUrl,
+          model: primaryModel,
+          smallModel,
+        }),
+      catch: (error) => new Error(describeUnknownError(error), { cause: error }),
+    });
+
+    const summaryLines = [
+      `Claude Code configured (${isRemote ? "remote" : "local"})`,
+      `Config: ${configPath}`,
+      `URL: ${baseUrl}`,
+      `Model: ${primaryModel}`,
+      `Small model: ${smallModel}`,
+      `Auth token: ${apiKey === undefined ? "placeholder/local" : "configured"}`,
+      `Env keys: ${Object.keys(envConfig).join(", ")}`,
+    ];
+
+    if (needsModelDiscovery && modelIds.length === 0) {
+      summaryLines.push(
+        "Model discovery: unavailable, using configured or fallback defaults."
+      );
+    }
+
+    return yield* Console.log(summaryLines.join("\n"));
+  }).pipe(Effect.catch((error) => failCli(describeUnknownError(error))));
+
+
 const statusLive = Layer.mergeAll(
   AppConfig.Default,
   AccountRepository.Default,
@@ -719,6 +924,17 @@ const runCli = (args: readonly string[]) => {
 
   if (args[0] === "auth" && args[1] === "login") {
     return runAuthLoginCommand(parseAuthLoginOptions(args.slice(2)));
+  }
+
+  if (args[0] === "auth" && args[1] === "logout") {
+    if (args.length > 2) {
+      return failCli(`Unknown auth logout option: ${args[2]}`);
+    }
+    return runAuthLogoutCommand;
+  }
+
+  if (args[0] === "config") {
+    return runConfigCommand(parseConfigOptions(args.slice(1)));
   }
 
   if (args[0] === "models") {

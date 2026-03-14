@@ -207,19 +207,25 @@ const runServer = async (env: EnvMap): Promise<void> => {
     ...Object.fromEntries(env.entries()),
   } as Record<string, string>;
 
-  console.log(`Starting CopilotX on http://${host}:${port}`);
+  const args = ["bun", "run", "src/bin/cli.ts", "serve", "--host", host];
+  if (port !== defaultPort) {
+    args.push("--port", port);
+  }
+
+  console.log(
+    port === defaultPort
+      ? `Starting CopilotX with preferred URL http://${host}:${port}`
+      : `Starting CopilotX on http://${host}:${port}`
+  );
   console.log("Use `mise run auth-login` in another terminal to add an account.");
 
-  const server = Bun.spawn(
-    ["bun", "run", "src/bin/cli.ts", "serve", "--host", host, "--port", port],
-    {
-      cwd: repoRoot,
-      env: mergedEnv,
-      stderr: "inherit",
-      stdin: "inherit",
-      stdout: "inherit",
-    }
-  );
+  const server = Bun.spawn(args, {
+    cwd: repoRoot,
+    env: mergedEnv,
+    stderr: "inherit",
+    stdin: "inherit",
+    stdout: "inherit",
+  });
 
   const forwardSignal = () => {
     try {
