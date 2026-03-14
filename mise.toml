@@ -1,0 +1,66 @@
+[tools]
+bun = "latest"
+
+[tasks.install]
+description = "Install Bun dependencies"
+run = "bun install"
+
+[tasks.build]
+description = "Build the TypeScript project"
+run = "bun run build"
+
+[tasks.typecheck]
+description = "Run the TypeScript checker"
+run = "bun run typecheck"
+
+[tasks.test]
+description = "Run the Bun test suite"
+run = "bun run test"
+
+[tasks.check]
+description = "Run typecheck and tests"
+run = "bun run check"
+
+[tasks.dev]
+description = "Start the local proxy in development mode"
+run = "bun run src/bin/cli.ts serve --host 127.0.0.1 --port 24680"
+
+[tasks.serve]
+description = "Start the local proxy"
+run = "bun run src/bin/cli.ts serve"
+
+[tasks.auth-login]
+description = "Authenticate a Copilot account"
+run = "bun run src/bin/cli.ts auth login"
+
+[tasks.models]
+description = "List available models"
+run = "bun run src/bin/cli.ts models"
+
+[tasks.db-up]
+description = "Start the local PostgreSQL service"
+run = "docker compose up -d postgres"
+
+[tasks.db-down]
+description = "Stop the local PostgreSQL service"
+run = "docker compose down"
+
+[tasks.db-reset]
+description = "Reset the local PostgreSQL service and data"
+run = "docker compose down -v && docker compose up -d postgres"
+
+[tasks.db-generate]
+description = "Generate Drizzle migrations"
+run = "bun run db:generate"
+
+[tasks.db-migrate]
+description = "Apply Drizzle migrations"
+run = "bun run db:migrate"
+
+[tasks.knip]
+description = "Run dead-code analysis"
+run = "bun run knip"
+
+[tasks.jscpd]
+description = "Run duplicate-code analysis"
+run = "bun run jscpd"

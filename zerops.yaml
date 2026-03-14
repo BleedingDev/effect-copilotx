@@ -1,0 +1,31 @@
+zerops:
+  - setup: app
+    build:
+      base: bun@latest
+      buildCommands:
+        - bun install --frozen-lockfile
+        - bun run build
+      deployFiles:
+        - dist
+        - package.json
+        - bun.lock
+        - node_modules
+        - drizzle
+    deploy:
+      readinessCheck:
+        httpGet:
+          port: 24680
+          path: /readyz
+        failureTimeout: 60
+        retryPeriod: 10
+    run:
+      base: bun@latest
+      ports:
+        - port: 24680
+          protocol: TCP
+          httpSupport: true
+      envVariables:
+        NODE_ENV: production
+        COPILOTX_HOST: 0.0.0.0
+        COPILOTX_PORT: 24680
+      start: bun dist/bin/server.js

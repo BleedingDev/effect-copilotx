@@ -1,0 +1,14 @@
+{
+  "threshold": 1,
+  "reporters": ["console", "json"],
+  "absolute": true,
+  "pattern": ["src/**/*.ts"],
+  "ignore": [
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "**/fixtures/**",
+    "**/generated/**",
+    "**/drizzle/**",
+    "**/dist/**"
+  ]
+}

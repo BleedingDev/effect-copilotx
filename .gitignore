@@ -1,0 +1,34 @@
+# Python legacy artifacts (until cutover is complete)
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+ENV/
+.pytest_cache/
+.ruff_cache/
+
+# Bun / TypeScript
+node_modules/
+dist/
+coverage/
+.drizzle/
+.rslib/
+.rsbuild/
+.turbo/
+.knip-tmp/
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
