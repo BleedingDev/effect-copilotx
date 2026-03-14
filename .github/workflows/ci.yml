@@ -1,0 +1,96 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Test
+        run: bun test
+
+      - name: Build
+        run: bun run build
+
+  smoke-local-start:
+    runs-on: ubuntu-latest
+    needs: verify
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Boot the documented local stack
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cleanup() {
+            docker compose down -v || true
+          }
+          trap cleanup EXIT
+
+          mise run start > /tmp/copilotx-start.log 2>&1 &
+          server_pid=$!
+
+          ready_json=""
+          for _ in $(seq 1 60); do
+            if ready_json=$(curl -fsS http://127.0.0.1:24680/readyz); then
+              break
+            fi
+            sleep 2
+          done
+
+          if [[ -z "$ready_json" ]]; then
+            cat /tmp/copilotx-start.log
+            kill "$server_pid" || true
+            wait "$server_pid" || true
+            echo "CopilotX never became ready." >&2
+            exit 1
+          fi
+
+          printf '%s\n' "$ready_json"
+
+          grep -q '"status":"awaiting_authentication"' <<<"$ready_json"
+          grep -Eq '^COPILOTX_TOKEN_ENCRYPTION_KEY=[0-9a-f]{64}$' .env
+
+          kill "$server_pid" || true
+          wait "$server_pid" || true
+
+      - name: Print startup log on failure
+        if: failure()
+        run: cat /tmp/copilotx-start.log
