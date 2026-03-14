@@ -1,18 +1,17 @@
 services:
   postgres:
-    image: postgres:17-alpine
-    container_name: copilotx-postgres
+    image: postgres:18-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: copilotx_dev
+      POSTGRES_DB: effect_copilotx_dev
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - copilotx-postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d copilotx_dev"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d effect_copilotx_dev"]
       interval: 5s
       timeout: 5s
       retries: 12

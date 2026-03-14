@@ -1,6 +1,18 @@
 [tools]
 bun = "latest"
 
+[tasks.start]
+description = "Create local env, start PostgreSQL 18, and run CopilotX"
+run = "bun run tools/start-local.ts"
+
+[tasks.dev]
+description = "Alias for start"
+run = "bun run tools/start-local.ts"
+
+[tasks.stop]
+description = "Stop local PostgreSQL"
+run = "docker compose down"
+
 [tasks.install]
 description = "Install Bun dependencies"
 run = "bun install"
@@ -21,28 +33,32 @@ run = "bun run test"
 description = "Run typecheck and tests"
 run = "bun run check"
 
-[tasks.dev]
-description = "Start the local proxy in development mode"
-run = "bun run src/bin/cli.ts serve --host 127.0.0.1 --port 24680"
-
 [tasks.serve]
-description = "Start the local proxy"
+description = "Start only the proxy server (advanced)"
+env = { _.file = ".env" }
 run = "bun run src/bin/cli.ts serve"
 
 [tasks.auth-login]
 description = "Authenticate a Copilot account"
+env = { _.file = ".env" }
 run = "bun run src/bin/cli.ts auth login"
 
+[tasks.status]
+description = "Show account and quota status"
+env = { _.file = ".env" }
+run = "bun run src/bin/cli.ts status"
+
 [tasks.models]
-description = "List available models"
+description = "List all discovered models, including hidden ones"
+env = { _.file = ".env" }
 run = "bun run src/bin/cli.ts models"
 
 [tasks.db-up]
-description = "Start the local PostgreSQL service"
+description = "Start only the local PostgreSQL service (advanced)"
 run = "docker compose up -d postgres"
 
 [tasks.db-down]
-description = "Stop the local PostgreSQL service"
+description = "Stop only the local PostgreSQL service (advanced)"
 run = "docker compose down"
 
 [tasks.db-reset]
@@ -55,6 +71,7 @@ run = "bun run db:generate"
 
 [tasks.db-migrate]
 description = "Apply Drizzle migrations"
+env = { _.file = ".env" }
 run = "bun run db:migrate"
 
 [tasks.knip]

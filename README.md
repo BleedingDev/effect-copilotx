@@ -1,269 +1,115 @@
-# CopilotX
+# effect-copilotx
 
-GitHub Copilot API proxy for OpenAI-compatible and Anthropic-compatible clients.
+Effect/Bun rewrite of CopilotX.
 
-This repository is the Bun/Effect rewrite. It persists account state in PostgreSQL, proxies requests to the Copilot upstream API, and exposes both CLI and HTTP flows for account onboarding.
+It runs a local GitHub Copilot proxy with:
+- OpenAI-compatible endpoints
+- Anthropic-compatible endpoint
+- CLI login/status/models
+- HTTP device auth bootstrap endpoints
+- PostgreSQL-backed account state and usage counters
 
-## What works today
+## Dead simple local start
 
-- OpenAI-compatible endpoints:
-  - `POST /v1/chat/completions`
-  - `POST /v1/responses`
-- Anthropic-compatible endpoint:
-  - `POST /v1/messages`
-- Model listing:
-  - `GET /v1/models`
-- Health endpoints:
-  - `GET /health`
-  - `GET /readyz`
-- CLI status:
-  - `copilotx status`
-  - `copilotx auth status`
-- CLI login:
-  - `copilotx auth login`
-  - `copilotx auth login --token <github-token>`
-- HTTP device login flow:
-  - `POST /auth/device`
-  - `POST /auth/device/poll`
-- Local proxy usage accounting persisted in PostgreSQL
-- Copilot quota reporting from GitHub
-- Optional premium-request billing report lookup with a billing-capable GitHub token
-
-## Requirements
-
-- [Mise](https://mise.jdx.dev/) or Bun 1.3.10+
-- PostgreSQL 17+
-- A 32-byte token encryption key, encoded as either:
-  - 64 hex characters, or
-  - base64
-
-## Local development with Mise
-
-### 1. Install tools and dependencies
+### 1. Install Bun via Mise
 
 ```bash
 mise install
-mise run install
 ```
 
-### 2. Start PostgreSQL
+### 2. Start everything
 
 ```bash
-mise run db-up
+mise run start
 ```
 
-This starts the local database from `compose.yaml`:
-- database: `copilotx_dev`
-- user: `postgres`
-- password: `postgres`
-- port: `5432`
+That one command will:
+- install Bun dependencies if needed
+- create `.env` from `.env.example` if missing
+- generate `COPILOTX_TOKEN_ENCRYPTION_KEY` if blank
+- start PostgreSQL 18 with Docker Compose, or reuse an existing database already reachable at `DATABASE_URL`
+- wait for PostgreSQL to be ready
+- auto-apply Drizzle migrations
+- start the proxy on `http://127.0.0.1:24680`
 
-### 3. Configure environment
+### 3. Login to GitHub Copilot
 
-Copy `.env.example` to `.env` and set at least:
-
-```bash
-DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/copilotx_dev
-COPILOTX_TOKEN_ENCRYPTION_KEY=<64-hex-chars>
-```
-
-Optional but recommended for remote access:
-
-```bash
-COPILOTX_API_KEY=<random-secret>
-```
-
-Optional billing token for premium-request billing reports:
-
-```bash
-COPILOTX_GITHUB_BILLING_TOKEN=<billing-capable-github-token>
-```
-
-### 4. Run migrations if you need CLI-only bootstrap
-
-```bash
-mise run db-migrate
-```
-
-The server now applies Drizzle migrations automatically on startup. This manual step is still useful if you want to run CLI commands that hit PostgreSQL before starting the server.
-
-### 5. Authenticate an account
-
-#### Device flow from the CLI
+In another terminal:
 
 ```bash
 mise run auth-login
 ```
 
-This prints:
-- the GitHub verification URL
-- the user code to enter in the browser
-- polling progress until the account is imported
+### 4. Use it
 
-#### Import with an existing GitHub token
+OpenAI-compatible base URL:
 
-```bash
-bun src/bin/cli.ts auth login --token <github-token>
+```text
+http://127.0.0.1:24680/v1
 ```
 
-#### Import legacy local state
+Anthropic-compatible base URL:
 
-If you already have `~/.copilotx/auth.json` from the older implementation:
-
-```bash
-bun run tools/import-legacy-account.ts
+```text
+http://127.0.0.1:24680
 ```
 
-### 6. Start the server
+## The only commands most people need
 
 ```bash
-mise run dev
+mise run start      # start Postgres + proxy
+mise run stop       # stop Postgres
+mise run auth-login # device-flow login
+mise run status     # auth/quota/account status
+mise run models     # list all models, including hidden ones
 ```
 
-Default local bind:
-- host: `127.0.0.1`
-- port: `24680`
+## Useful URLs
 
-### 7. Verify
+- Health: `GET /health`
+- Readiness: `GET /readyz`
+- Models: `GET /v1/models`
+- OpenAI chat: `POST /v1/chat/completions`
+- OpenAI responses: `POST /v1/responses`
+- Anthropic messages: `POST /v1/messages`
 
-```bash
-curl http://127.0.0.1:24680/health
-curl http://127.0.0.1:24680/readyz
-curl http://127.0.0.1:24680/v1/models
-bun src/bin/cli.ts status
-```
+## Auth bootstrap API
 
-## CLI commands
+If you want to onboard accounts through HTTP instead of the CLI:
 
-Currently implemented:
-
-```bash
-copilotx --version
-copilotx serve [--host HOST] [--port PORT]
-copilotx status
-copilotx auth login [--token TOKEN]
-copilotx auth status
-copilotx models
-```
-
-`copilotx models` prints every discovered model from the runtime merge, including models that GitHub marks hidden from picker UI. The table includes a `Hidden` column so those models remain visible instead of being silently filtered out.
-
-## HTTP endpoints
-
-### Proxy endpoints
-
-| Endpoint | Method | Purpose |
-| --- | --- | --- |
-| `/v1/chat/completions` | POST | OpenAI chat completions compatibility |
-| `/v1/responses` | POST | OpenAI Responses API compatibility |
-| `/v1/messages` | POST | Anthropic messages compatibility |
-| `/v1/models` | GET | List merged available models |
-| `/health` | GET | Process health |
-| `/readyz` | GET | Server readiness for deployment and auth bootstrap |
-
-### Auth bootstrap endpoints
-
-These endpoints use the same device-flow logic as the CLI.
-
-| Endpoint | Method | Purpose |
-| --- | --- | --- |
-| `/auth/device` | POST | Start GitHub device authorization and return `device_code` + `user_code` |
-| `/auth/device/poll` | POST | Poll device authorization using `device_code`; imports the account when authorized |
-
-#### Start device authorization
+### Start device flow
 
 ```bash
 curl -X POST http://127.0.0.1:24680/auth/device \
   -H 'Authorization: Bearer YOUR_API_KEY'
 ```
 
-Example response:
-
-```json
-{
-  "object": "device_authorization",
-  "status": "authorization_pending",
-  "device_code": "0123456789abcdef...",
-  "user_code": "ABCD-EFGH",
-  "verification_uri": "https://github.com/login/device",
-  "expires_in_seconds": 900,
-  "interval_seconds": 5
-}
-```
-
-#### Poll device authorization
+### Poll device flow
 
 ```bash
 curl -X POST http://127.0.0.1:24680/auth/device/poll \
   -H 'Authorization: Bearer YOUR_API_KEY' \
   -H 'Content-Type: application/json' \
-  -d '{"device_code":"0123456789abcdef..."}'
+  -d '{"device_code":"..."}'
 ```
 
-Possible responses:
-- `202` with `status: authorization_pending`
-- `202` with `status: slow_down`
-- `200` with `status: authorized` and imported account details
-- `403` with `status: access_denied`
-- `410` with `status: expired_token`
+## Notes that matter
 
-## Authentication and readiness semantics
-
-- `/readyz` now returns `200` as soon as the server is healthy enough to accept onboarding/auth requests.
-- Before any Copilot account exists, the response body reports:
-  - `authenticated: false`
-  - `copilot_ready: false`
-  - `status: "awaiting_authentication"`
-- This is intentional so fresh deployments can come up and then receive their first account via CLI or HTTP auth flow.
-
-## Environment variables
-
-Minimum required:
-
-```bash
-DATABASE_URL=postgresql://...
-COPILOTX_TOKEN_ENCRYPTION_KEY=<64-hex-or-base64>
-```
-
-Common runtime settings:
-
-```bash
-COPILOTX_HOST=127.0.0.1
-COPILOTX_PORT=24680
-COPILOTX_API_KEY=
-COPILOTX_LOG_LEVEL=info
-COPILOTX_TRUST_LOCALHOST=false
-COPILOTX_GITHUB_BILLING_TOKEN=
-```
+- Minimum supported database: PostgreSQL 18+
+- Server startup auto-runs migrations
+- `mise run models` shows all discovered models, including models GitHub marks hidden
+- `/readyz` returns `200` before first login so fresh deployments can bootstrap auth
 
 ## Deployment
 
-### ZaneOps with Railpack
+### ZaneOps Railpack
 
-Railpack is the recommended deployment path for this rewrite.
+Use:
+- Install: `bun install --frozen-lockfile`
+- Build: `bun run build`
+- Start: `bun dist/bin/server.js`
 
-Build directory:
-- repository root
-
-Install command:
-
-```bash
-bun install --frozen-lockfile
-```
-
-Build command:
-
-```bash
-bun run build
-```
-
-Start command:
-
-```bash
-bun dist/bin/server.js
-```
-
-Required environment variables in ZaneOps:
+Required env:
 
 ```bash
 DATABASE_URL=postgresql://...
@@ -273,21 +119,11 @@ COPILOTX_HOST=0.0.0.0
 COPILOTX_PORT=$PORT
 ```
 
-Notes:
-- `src/bin/server.ts` now reads host and port from config, so the packaged `dist/bin/server.js` is suitable for Railpack.
-- Server startup now applies Drizzle migrations automatically before listening, so fresh deployments do not need a separate `bun run db:migrate` boot step.
-- If you expose auth bootstrap endpoints publicly, keep `COPILOTX_API_KEY` set.
-
 ### Zerops
 
-A starting `zerops.yaml` is included.
+`zerops.yaml` is included.
 
-Current behavior:
-- build base: `bun@latest`
-- start command: `bun dist/bin/server.js`
-- readiness check: `/readyz`
-
-You still need to provide real secrets and service wiring in Zerops:
+The same required env vars apply:
 
 ```bash
 DATABASE_URL=postgresql://...
@@ -297,34 +133,8 @@ COPILOTX_HOST=0.0.0.0
 COPILOTX_PORT=24680
 ```
 
-Scaling guidance:
-- Bun service: start with a single container, then scale vertically first.
-- PostgreSQL: use Zerops vertical scaling; use HA mode for production if needed.
-- Multi-container runtime deployment should be load-tested before relying on it for account rotation and rate-limit behavior.
+## Truthful limits
 
-### Docker
-
-This rewrite does not yet include a first-class production Dockerfile. Railpack and Zerops are the current documented deployment paths.
-
-## Quota and usage reporting
-
-`copilotx status` reports:
-- account health
-- token validity
-- model catalog refresh state
-- GitHub Copilot plan and premium request quota
-- optional GitHub premium-request billing report data
-- local proxy-observed request and token counts persisted in PostgreSQL
-
-What it does not report:
-- global GitHub prompt/completion token totals across all Copilot surfaces
-
-GitHub exposes request/quota and billing data, but not a truthful global prompt/completion token counter for end-user Copilot accounts.
-
-## Disclaimer
-
-Use this tool in compliance with GitHub Copilot terms and any organizational policy that applies to your account.
-
-## License
-
-MIT
+- No first-class production Dockerfile yet
+- HTTP auth API currently covers device-flow bootstrap only
+- GitHub still does not expose truthful global prompt/completion token totals for end-user Copilot accounts
