@@ -77,6 +77,67 @@ describe("account login helpers", () => {
     })
   );
 
+  it.effect("preserves explicit import settings when requested", () =>
+    Effect.tryPromise({
+      catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+      try: async () => {
+        const upserts: Array<Record<string, unknown>> = [];
+
+        await Effect.runPromise(
+          importGitHubToken(
+            {
+              fetchCopilotToken: () =>
+                Effect.succeed({
+                  apiBaseUrl: "https://api.individual.githubcopilot.com",
+                  copilotToken: "copilot-token",
+                  copilotTokenExpiresAt: null,
+                }),
+              fetchGitHubUser: () =>
+                Effect.succeed({ login: "octocat", userId: "7" }),
+            },
+            {
+              upsertAccount: (input) => {
+                upserts.push(input as Record<string, unknown>);
+                return Effect.succeed({
+                  accountId: input.accountId,
+                  apiBaseUrl: input.apiBaseUrl,
+                  copilotTokenExpiresAt: input.copilotTokenExpiresAt,
+                  githubLogin: input.githubLogin,
+                  githubUserId: input.githubUserId,
+                  label: input.label,
+                  modelIds: [],
+                });
+              },
+            },
+            "ghu_authorized",
+            undefined,
+            {
+              enabled: false,
+              label: "team-octo",
+              priority: 9,
+              modelCatalog: [
+                { hidden: false, modelId: "gpt-5", vendor: "github-copilot" },
+              ],
+              reauthRequired: true,
+            }
+          )
+        );
+
+        expect(upserts).toHaveLength(1);
+        expect(upserts[0]).toMatchObject({
+          enabled: false,
+          githubToken: "ghu_authorized",
+          label: "team-octo",
+          priority: 9,
+          reauthRequired: true,
+        });
+        expect(upserts[0]?.modelCatalog).toEqual([
+          { hidden: false, modelId: "gpt-5", vendor: "github-copilot" },
+        ]);
+      },
+    })
+  );
+
   it.effect("reports device authorization as pending without importing", () =>
     Effect.tryPromise({
       catch: (error) => (error instanceof Error ? error : new Error(String(error))),

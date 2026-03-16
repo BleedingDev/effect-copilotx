@@ -1,6 +1,9 @@
 import * as Effect from "effect/Effect";
 
-import type { UpsertAccountInput } from "#/domain/accounts/account-types";
+import type {
+  ModelCatalogEntry,
+  UpsertAccountInput,
+} from "#/domain/accounts/account-types";
 import type {
   CopilotTokenExchange,
   DeviceCodePollResult,
@@ -16,6 +19,14 @@ export interface ImportedAccountSummary {
   readonly githubUserId: string;
   readonly label: string;
   readonly modelCount: number;
+}
+
+export interface ImportGitHubTokenOptions {
+  readonly enabled?: boolean;
+  readonly label?: string;
+  readonly modelCatalog?: readonly ModelCatalogEntry[];
+  readonly priority?: number;
+  readonly reauthRequired?: boolean;
 }
 
 export type DeviceLoginPollResult =
@@ -88,23 +99,35 @@ const toImportedAccountSummary = (account: {
   modelCount: account.modelIds.length,
 });
 
+const normalizedLabel = (label: string | undefined, fallback: string): string => {
+  const trimmed = label?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : fallback;
+};
+
 const buildUpsertAccountInput = (
   githubToken: string,
   user: GitHubUser,
-  tokenExchange: CopilotTokenExchange
-): UpsertAccountInput => ({
-  accountId: `github-${user.userId}`,
-  apiBaseUrl: tokenExchange.apiBaseUrl,
-  copilotToken: tokenExchange.copilotToken,
-  copilotTokenExpiresAt: tokenExchange.copilotTokenExpiresAt,
-  enabled: true,
-  githubLogin: user.login,
-  githubToken,
-  githubUserId: user.userId,
-  label: user.login,
-  modelCatalog: [],
-  reauthRequired: false,
-});
+  tokenExchange: CopilotTokenExchange,
+  options?: ImportGitHubTokenOptions
+) => {
+  const baseInput = {
+    accountId: `github-${user.userId}`,
+    apiBaseUrl: tokenExchange.apiBaseUrl,
+    copilotToken: tokenExchange.copilotToken,
+    copilotTokenExpiresAt: tokenExchange.copilotTokenExpiresAt,
+    enabled: options?.enabled ?? true,
+    githubLogin: user.login,
+    githubToken,
+    githubUserId: user.userId,
+    label: normalizedLabel(options?.label, user.login),
+    modelCatalog: options?.modelCatalog ?? [],
+    reauthRequired: options?.reauthRequired ?? false,
+  } satisfies UpsertAccountInput;
+
+  return options?.priority === undefined
+    ? baseInput
+    : { ...baseInput, priority: options.priority };
+};
 
 export const requestDeviceLogin = (
   auth: AccountLoginAuth,
@@ -115,13 +138,14 @@ export const importGitHubToken = (
   auth: Pick<AccountLoginAuth, "fetchCopilotToken" | "fetchGitHubUser">,
   repository: AccountLoginRepository,
   githubToken: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: ImportGitHubTokenOptions
 ): Effect.Effect<ImportedAccountSummary, Error | unknown> =>
   Effect.gen(function* () {
     const user = yield* auth.fetchGitHubUser(githubToken, signal);
     const tokenExchange = yield* auth.fetchCopilotToken(githubToken, signal);
     const account = yield* repository.upsertAccount(
-      buildUpsertAccountInput(githubToken, user, tokenExchange)
+      buildUpsertAccountInput(githubToken, user, tokenExchange, options)
     );
     return toImportedAccountSummary(account);
   });

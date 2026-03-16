@@ -134,6 +134,46 @@ export const authorizeRequest = (
   );
 };
 
+export const authorizeImportRequest = (
+  request: HttpServerRequest,
+  config: AppConfigShape
+): HttpServerResponse.HttpServerResponse | null => {
+  const configuredImportApiKey = config.security.importApiKey;
+  if (configuredImportApiKey === undefined || configuredImportApiKey.length === 0) {
+    return HttpServerResponse.jsonUnsafe(
+      {
+        error: {
+          message: "GitHub token import is disabled.",
+          type: "not_found",
+        },
+      },
+      {
+        headers: buildCorsHeaders(request, config),
+        status: 404,
+      }
+    );
+  }
+
+  const presentedApiKey = extractPresentedApiKey(request);
+  if (presentedApiKey === configuredImportApiKey) {
+    return null;
+  }
+
+  return HttpServerResponse.jsonUnsafe(
+    {
+      error: {
+        message:
+          "Invalid or missing import API key. Set Authorization: Bearer <your-import-key> header.",
+        type: "authentication_error",
+      },
+    },
+    {
+      headers: buildCorsHeaders(request, config),
+      status: 401,
+    }
+  );
+};
+
 export const jsonResponse = (
   request: HttpServerRequest,
   config: AppConfigShape,
