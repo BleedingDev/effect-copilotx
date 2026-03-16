@@ -69,6 +69,8 @@ That command configures:
   - Windows cmd: `~/.copilotx/bin/omp-copilotx.cmd`
   - PowerShell: `~/.copilotx/bin/omp-copilotx.ps1`
 
+- GitHub Copilot CLI is recognized by `copilotx config github-copilot-cli`, but GitHub CLI does not expose custom Copilot backend/base URL/API key overrides, so it cannot be pointed at CopilotX today.
+
 Add launchers to PATH once (pick your shell):
 - Bash/Zsh: `export PATH="$HOME/.copilotx/bin:$PATH"`
 - Fish: `fish_add_path ~/.copilotx/bin`

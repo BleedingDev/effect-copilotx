@@ -596,6 +596,7 @@ const runConfigCommand = (options: ConfigOptions) =>
     const summaryLines = [
       `Agent integrations configured (${isRemote ? "remote" : "local"})`,
       `Targets: ${targets.join(", ")}`,
+      "GitHub Copilot CLI: unsupported as a CopilotX target (no custom base URL/API key override); run `copilotx config github-copilot-cli` for details.",
       `URL: ${baseUrl}`,
       `Claude model: ${primaryModel}`,
       `Claude small model: ${smallModel}`,
