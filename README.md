@@ -46,7 +46,7 @@ mise run auth-login
 
 > If you want to use a hosted proxy from coding agents, pass the deployed URL and your normal proxy API key.
 
-> The CLI can now configure Claude Code, Codex CLI, Factory Droid, and Oh My Pi in one step.
+> The CLI can now configure Claude Code, Codex CLI, Factory Droid, and Oh My Pi in one step, and it recognizes `github-copilot-cli` with an explicit unsupported message.
 
 ```bash
 copilotx config all \
@@ -64,7 +64,7 @@ That command configures:
 
 > `export PATH="$HOME/.copilotx/bin:$PATH"`
 
-> Individual targets are also supported: `claude-code`, `codex-cli`, `factory-droid`, `oh-my-pi`.
+> Individual targets are also supported: `claude-code`, `codex-cli`, `factory-droid`, `oh-my-pi`, `github-copilot-cli`.
 
 ### 5. Use it
 
@@ -97,6 +97,7 @@ copilotx config claude-code       # wire Claude Code to local or remote CopilotX
 copilotx config codex-cli         # wire OpenAI Codex CLI to CopilotX
 copilotx config factory-droid     # wire Factory Droid to CopilotX
 copilotx config oh-my-pi          # create Oh My Pi launcher against CopilotX
+copilotx config github-copilot-cli # explains why GitHub CLI cannot target CopilotX
 copilotx config all               # configure all supported agent CLIs at once
 ```
 
@@ -129,13 +130,20 @@ curl -X POST http://127.0.0.1:24680/auth/device/poll \
   -d '{"device_code":"..."}'
 ```
 
-### Import an existing GitHub token (admin-only)
+### Admin-only: import an existing GitHub token
 
 ```bash
-curl -X POST https://your-domain.example/auth/import-github-token \
-  -H 'Authorization: Bearer YOUR_IMPORT_API_KEY' \
+curl -X POST https://your-domain.example/admin/accounts/import-github-token \
+  -H 'Authorization: Bearer YOUR_ADMIN_API_KEY' \
   -H 'Content-Type: application/json' \
   -d '{"github_token":"ghu_..."}'
+```
+
+### Admin-only: inspect account health and quota state
+
+```bash
+curl -H 'Authorization: Bearer YOUR_ADMIN_API_KEY' \
+  https://your-domain.example/admin/status
 ```
 
 ## Using the deployed proxy from coding agents
@@ -166,6 +174,15 @@ After `copilotx config factory-droid --base-url ... --api-key ...`:
 After `copilotx config oh-my-pi --base-url ... --api-key ...`:
 - run `omp-copilotx`
 - the launcher exports `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and Oh My Pi role model env vars before launching `omp`
+
+### GitHub Copilot CLI
+
+GitHub Copilot CLI is not currently configurable as a CopilotX client.
+
+GitHub's official Copilot CLI docs currently expose trusted-directory settings, tool/path/URL permissions, hooks, skills, plugins, and network proxy/certificate settings.
+
+They do not expose a supported custom model provider, base URL, or API key override for third-party OpenAI/Anthropic-compatible backends, so `copilotx config github-copilot-cli` intentionally returns a clear error instead of writing a misleading setup.
+
 
 ### Verify the deployment first
 
@@ -206,7 +223,7 @@ Required env:
 DATABASE_URL=postgresql://...
 COPILOTX_TOKEN_ENCRYPTION_KEY=<64-hex-or-base64>
 COPILOTX_API_KEY=<normal-client-secret>
-COPILOTX_IMPORT_API_KEY=<admin-only-import-secret>
+COPILOTX_ADMIN_API_KEY=<admin-only-secret>
 COPILOTX_HOST=0.0.0.0
 COPILOTX_PORT=$PORT
 ```
@@ -221,7 +238,7 @@ The same required env vars apply:
 DATABASE_URL=postgresql://...
 COPILOTX_TOKEN_ENCRYPTION_KEY=<64-hex-or-base64>
 COPILOTX_API_KEY=<normal-client-secret>
-COPILOTX_IMPORT_API_KEY=<admin-only-import-secret>
+COPILOTX_ADMIN_API_KEY=<admin-only-secret>
 COPILOTX_HOST=0.0.0.0
 COPILOTX_PORT=24680
 ```
@@ -229,5 +246,5 @@ COPILOTX_PORT=24680
 ## Truthful limits
 
 - No first-class production Dockerfile yet
-- HTTP auth API covers device-flow bootstrap and admin token import; keep `COPILOTX_IMPORT_API_KEY` admin-only
+- Admin HTTP API covers account import and `/admin/status`; keep `COPILOTX_ADMIN_API_KEY` admin-only
 - GitHub still does not expose truthful global prompt/completion token totals for end-user Copilot accounts

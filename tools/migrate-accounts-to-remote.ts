@@ -37,7 +37,7 @@ const describeRemoteError = (payload: unknown): string => {
 };
 
 const remoteBaseUrl = normalizeBaseUrl(requireEnv("COPILOTX_REMOTE_BASE_URL"));
-const remoteImportApiKey = requireEnv("COPILOTX_REMOTE_IMPORT_API_KEY");
+const remoteAdminApiKey = requireEnv("COPILOTX_REMOTE_ADMIN_API_KEY");
 const selectors = parseSelectors(process.env.COPILOTX_MIGRATE_SELECTORS);
 
 const services = Layer.mergeAll(AccountRepository.Default);
@@ -76,11 +76,14 @@ const successes: Array<Record<string, unknown>> = [];
 const failures: Array<Record<string, unknown>> = [];
 
 for (const account of localAccounts) {
-  const response = await fetch(`${remoteBaseUrl}/auth/import-github-token`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${remoteImportApiKey}`,
-      "Content-Type": "application/json",
+  const response = await fetch(
+    `${remoteBaseUrl}/admin/accounts/import-github-token`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${remoteAdminApiKey}`,
+        "Content-Type": "application/json",
+      },
     },
     body: JSON.stringify({
       enabled: account.enabled,

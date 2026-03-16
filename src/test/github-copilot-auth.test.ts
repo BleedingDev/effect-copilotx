@@ -25,7 +25,7 @@ const testConfig: AppConfigShape = {
     corsOrigins: [],
     forceModels: [],
     githubBillingToken: undefined,
-    importApiKey: undefined,
+    adminApiKey: undefined,
     publicPaths: ["/", "/health", "/readyz"],
     tokenEncryptionKey: Redacted.make("0123456789abcdef0123456789abcdef"),
     tokenEncryptionKeyId: "default",

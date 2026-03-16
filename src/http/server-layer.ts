@@ -2,6 +2,7 @@ import { BunHttpServer } from "@effect/platform-bun";
 import * as Layer from "effect/Layer";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 
+import { adminRoutes } from "#/http/routes/admin-routes";
 import { anthropicRoutes } from "#/http/routes/anthropic-routes";
 import { authRoutes } from "#/http/routes/auth-routes";
 import { baseRoutes } from "#/http/routes/base-routes";
@@ -20,6 +21,7 @@ export interface ServerListenOptions {
 
 const routeLayers = Layer.mergeAll(
   ...baseRoutes,
+  ...adminRoutes,
   ...authRoutes,
   ...modelRoutes,
   ...openAiRoutes,

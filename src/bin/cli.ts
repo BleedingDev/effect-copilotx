@@ -13,6 +13,7 @@ import {
 } from "#/app/app-info";
 import type { AccountSummary } from "#/domain/accounts/account-types";
 import { runServer } from "#/http/server-runner";
+import { collectAdminStatusSnapshot } from "#/services/admin-status";
 import { AccountRepository } from "#/services/account-repository";
 import {
   buildClaudeCodeEnv,
@@ -37,15 +38,8 @@ import {
   waitForDeviceLogin,
 } from "#/services/account-login";
 import { AppConfig } from "#/services/app-config";
-import type {
-  CopilotPremiumRequestUsageReport,
-  CopilotQuotaSnapshot,
-  CopilotUsageOverview,
-} from "#/services/github-copilot-auth";
+import type { CopilotQuotaSnapshot } from "#/services/github-copilot-auth";
 import { GitHubCopilotAuth } from "#/services/github-copilot-auth";
-import {
-  fetchPremiumRequestUsageStatus,
-} from "#/services/premium-request-usage";
 import { ProxyRuntimeService } from "#/services/proxy-runtime-service";
 import { readServerInfo } from "#/services/server-discovery";
 
@@ -85,11 +79,6 @@ interface StatusRow {
   readonly token: string;
 }
 
-interface AccountUsageStatus {
-  readonly accountId: string;
-  readonly error: string | null;
-  readonly usage: CopilotUsageOverview | null;
-}
 
 const usage = `${APP_NAME} ${APP_VERSION}
 
@@ -101,7 +90,7 @@ Usage:
   copilotx auth login [--token TOKEN]
   copilotx auth status
   copilotx auth logout
-  copilotx config <claude-code|codex-cli|factory-droid|oh-my-pi|all> [--base-url URL] [--api-key KEY] [--model ID] [--small-model ID]
+  copilotx config <claude-code|codex-cli|factory-droid|oh-my-pi|github-copilot-cli|all> [--base-url URL] [--api-key KEY] [--model ID] [--small-model ID]
 `;
 
 const parseServeOptions = (args: readonly string[]): ServeOptions => {
@@ -306,110 +295,6 @@ const compactQuota = (snapshot: CopilotQuotaSnapshot | null | undefined): string
   return `${snapshot.remaining}/${snapshot.entitlement}`;
 };
 
-const detailedQuota = (snapshot: CopilotQuotaSnapshot | null | undefined): string => {
-  if (snapshot === null || snapshot === undefined) {
-    return "unavailable";
-  }
-
-  if (snapshot.unlimited) {
-    return "included";
-  }
-
-  const used = Math.max(snapshot.entitlement - snapshot.remaining, 0);
-  const overageSuffix =
-    snapshot.overageCount > 0 ? `, ${snapshot.overageCount} overage` : "";
-
-  return `${used}/${snapshot.entitlement} used, ${snapshot.remaining} remaining (${snapshot.percentRemaining.toFixed(1)}% left${overageSuffix})`;
-};
-
-interface AggregateQuotaSnapshot {
-  readonly accounted: number;
-  readonly entitlement: number;
-  readonly remaining: number;
-  readonly unavailable: number;
-  readonly unlimited: number;
-}
-
-const aggregateQuotaSnapshots = (
-  snapshots: readonly (CopilotQuotaSnapshot | null | undefined)[]
-): AggregateQuotaSnapshot =>
-  snapshots.reduce<AggregateQuotaSnapshot>(
-    (summary, snapshot) => {
-      if (snapshot === null || snapshot === undefined) {
-        return { ...summary, unavailable: summary.unavailable + 1 };
-      }
-
-      if (snapshot.unlimited) {
-        return { ...summary, unlimited: summary.unlimited + 1 };
-      }
-
-      return {
-        accounted: summary.accounted + 1,
-        entitlement: summary.entitlement + snapshot.entitlement,
-        remaining: summary.remaining + snapshot.remaining,
-        unavailable: summary.unavailable,
-        unlimited: summary.unlimited,
-      };
-    },
-    {
-      accounted: 0,
-      entitlement: 0,
-      remaining: 0,
-      unavailable: 0,
-      unlimited: 0,
-    }
-  );
-
-const describeAggregateQuota = (
-  snapshots: readonly (CopilotQuotaSnapshot | null | undefined)[]
-): string => {
-  const aggregate = aggregateQuotaSnapshots(snapshots);
-
-  if (aggregate.accounted === 0) {
-    if (aggregate.unlimited > 0 && aggregate.unavailable === 0) {
-      return `included across ${aggregate.unlimited} account${aggregate.unlimited === 1 ? "" : "s"}`;
-    }
-
-    return `unavailable${aggregate.unavailable > 0 ? ` (${aggregate.unavailable} account${aggregate.unavailable === 1 ? "" : "s"} unavailable)` : ""}`;
-  }
-
-  const used = Math.max(aggregate.entitlement - aggregate.remaining, 0);
-  const qualifierParts = [
-    `${aggregate.accounted} metered`,
-    ...(aggregate.unlimited > 0 ? [`${aggregate.unlimited} included`] : []),
-    ...(aggregate.unavailable > 0 ? [`${aggregate.unavailable} unavailable`] : []),
-  ];
-
-  return `${used}/${aggregate.entitlement} used, ${aggregate.remaining} remaining (${qualifierParts.join(", ")} accounts)`;
-};
-
-const formatObservedRequests = (account: AccountSummary): string =>
-  `${account.successfulRequestCount}/${account.successfulStreamCount}`;
-
-const formatObservedTokens = (account: AccountSummary): string =>
-  `${account.inputTokenCount}/${account.outputTokenCount}`;
-
-const describeObservedUsage = (account: AccountSummary): string =>
-  `${account.successfulRequestCount} requests, ${account.successfulStreamCount} streams, ${account.inputTokenCount} input tokens, ${account.outputTokenCount} output tokens`;
-
-const describeAggregateObservedUsage = (accounts: readonly AccountSummary[]): string => {
-  const totals = accounts.reduce(
-    (summary, account) => ({
-      inputTokens: summary.inputTokens + account.inputTokenCount,
-      outputTokens: summary.outputTokens + account.outputTokenCount,
-      requests: summary.requests + account.successfulRequestCount,
-      streams: summary.streams + account.successfulStreamCount,
-    }),
-    {
-      inputTokens: 0,
-      outputTokens: 0,
-      requests: 0,
-      streams: 0,
-    }
-  );
-
-  return `${totals.requests} requests, ${totals.streams} streams, ${totals.inputTokens} input tokens, ${totals.outputTokens} output tokens`;
-};
 
 const formatQuantity = (value: number): string => {
   if (!Number.isFinite(value)) {
@@ -420,112 +305,6 @@ const formatQuantity = (value: number): string => {
   return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2);
 };
 
-const describePremiumRequestReport = (report: CopilotPremiumRequestUsageReport): string => {
-  const totals = report.usageItems.reduce(
-    (summary, item) => ({
-      billedAmount: summary.billedAmount + item.netAmount,
-      billedQuantity: summary.billedQuantity + item.netQuantity,
-      includedQuantity: summary.includedQuantity + item.discountQuantity,
-      totalQuantity: summary.totalQuantity + item.grossQuantity,
-    }),
-    {
-      billedAmount: 0,
-      billedQuantity: 0,
-      includedQuantity: 0,
-      totalQuantity: 0,
-    }
-  );
-
-  const billedCostSuffix =
-    totals.billedAmount > 0
-      ? ` ($${totals.billedAmount.toFixed(2)} billed)`
-      : "";
-
-  return `${formatQuantity(totals.totalQuantity)} this month, ${formatQuantity(totals.includedQuantity)} included, ${formatQuantity(totals.billedQuantity)} billed overage${billedCostSuffix}`;
-};
-
-const describePremiumRequestModels = (report: CopilotPremiumRequestUsageReport): string => {
-  const usageByModel = new Map<string, number>();
-
-  for (const item of report.usageItems) {
-    const model = item.model.trim();
-    if (model.length === 0) {
-      continue;
-    }
-
-    usageByModel.set(model, (usageByModel.get(model) ?? 0) + item.grossQuantity);
-  }
-
-  const topModels = [...usageByModel.entries()]
-    .sort((left, right) => right[1] - left[1])
-    .slice(0, 5);
-
-  return topModels.length === 0
-    ? "none"
-    : topModels
-        .map(([model, quantity]) => `${model} ${formatQuantity(quantity)}`)
-        .join(", ");
-};
-
-
-const tokenRemainingSeconds = (
-  account: Pick<AccountSummary, "copilotTokenExpiresAt">,
-  now: Date
-): number => {
-  if (account.copilotTokenExpiresAt === null) {
-    return 0;
-  }
-
-  return Math.max(
-    Math.floor((account.copilotTokenExpiresAt.getTime() - now.getTime()) / 1000),
-    0
-  );
-};
-
-const tokenState = (
-  account: AccountSummary,
-  now: Date,
-  refreshBufferSeconds: number
-): string => {
-  if (account.reauthRequired) {
-    return "reauth required";
-  }
-
-  if (account.copilotTokenExpiresAt === null) {
-    return "missing";
-  }
-
-  const remaining = tokenRemainingSeconds(account, now);
-  if (remaining === 0) {
-    return "expired";
-  }
-
-  if (remaining <= refreshBufferSeconds) {
-    return `refresh due ${formatDuration(remaining)}`;
-  }
-
-  return `valid ${formatDuration(remaining)}`;
-};
-
-const accountState = (account: AccountSummary, now: Date): string => {
-  if (!account.enabled) {
-    return "disabled";
-  }
-
-  if (account.reauthRequired) {
-    return "reauth required";
-  }
-
-  if (account.cooldownUntil !== null && account.cooldownUntil.getTime() > now.getTime()) {
-    return "cooling down";
-  }
-
-  if (account.lastError.length > 0) {
-    return "degraded";
-  }
-
-  return "ready";
-};
 
 const renderTable = (
   headers: readonly string[],
@@ -665,10 +444,17 @@ const resolveConfigTargets = (target: string) => {
 
 const runConfigCommand = (options: ConfigOptions) =>
   Effect.gen(function* runConfigCommand() {
+    if (options.target === "github-copilot-cli") {
+      return yield* failCli(
+        "GitHub Copilot CLI cannot currently be pointed at a custom CopilotX base URL. GitHub's official Copilot CLI docs expose trusted-directory, tool, path, URL, hook, and skill settings, but not a custom model provider, base URL, or API key override for third-party OpenAI/Anthropic-compatible backends."
+      );
+    }
+
+
     const targets = resolveConfigTargets(options.target);
     if (targets === null) {
       return yield* failCli(
-        `Unknown config target: ${options.target}\n\nAvailable targets: claude-code, codex-cli, factory-droid, oh-my-pi, all`
+        `Unknown config target: ${options.target}\n\nAvailable targets: claude-code, codex-cli, factory-droid, oh-my-pi, github-copilot-cli, all`
       );
     }
 
@@ -885,116 +671,58 @@ const runModelsCommand = Effect.gen(function* runModelsCommand() {
 );
 
 const runStatusCommand = Effect.gen(function* runStatusCommand() {
-  const config = yield* AppConfig;
-  const repository = yield* AccountRepository;
-  const auth = yield* GitHubCopilotAuth;
-  const runtime = yield* ProxyRuntimeService;
-  let accounts = yield* repository.listAccounts();
+  const snapshot = yield* collectAdminStatusSnapshot;
 
-  if (accounts.length === 0) {
+  if (!snapshot.authenticated) {
     return yield* failCli(
       "Not authenticated.\n\nRun `copilotx auth login`, or import an existing account first."
     );
   }
 
-  const modelRefresh = yield* runtime.listModels().pipe(
-    Effect.map((models) => ({
-      error: null as string | null,
-      mergedModelCount: models.length,
-    })),
-    Effect.catch((error) =>
-      Effect.succeed({
-        error: describeUnknownError(error),
-        mergedModelCount: null as number | null,
-      })
-    )
-  );
-
-  accounts = yield* repository.listAccounts();
-
-  const usageStatuses = yield* Effect.all(
-    accounts.map((account) =>
-      auth.fetchUsage(account.githubToken).pipe(
-        Effect.map(
-          (usage) =>
-            ({
-              accountId: account.accountId,
-              error: null,
-              usage,
-            }) satisfies AccountUsageStatus
-        ),
-        Effect.catch((error) =>
-          Effect.succeed({
-            accountId: account.accountId,
-            error: describeUnknownError(error),
-            usage: null,
-          } satisfies AccountUsageStatus)
-        )
-      )
-    )
-  );
-
-  const usageByAccountId = new Map(
-    usageStatuses.map((status) => [status.accountId, status] as const)
-  );
-
-  const runtimeSettings = yield* repository.getRuntimeSettings();
   const now = new Date();
-  const enabledAccounts = accounts.filter((account) => account.enabled);
-  const coolingDownAccounts = enabledAccounts.filter(
-    (account) =>
-      account.cooldownUntil !== null && account.cooldownUntil.getTime() > now.getTime()
-  );
-  const reauthAccounts = enabledAccounts.filter((account) => account.reauthRequired);
-  const healthyAccounts = enabledAccounts.filter(
-    (account) =>
-      !account.reauthRequired &&
-      (account.cooldownUntil === null || account.cooldownUntil.getTime() <= now.getTime()) &&
-      account.lastError.length === 0
-  );
-  const validTokenLifetimes = enabledAccounts
-    .map((account) => tokenRemainingSeconds(account, now))
-    .filter(
-      (remaining) => remaining > config.upstream.tokenRefreshBufferSeconds
-    );
-  const longestValidTokenLifetime =
-    validTokenLifetimes.length === 0 ? 0 : Math.max(...validTokenLifetimes);
-  const billingAccount =
-    accounts.find((account) => account.accountId === runtimeSettings.defaultAccountId) ??
-    accounts[0] ??
-    null;
-  const primaryBillingUsage =
-    billingAccount === null
-      ? null
-      : yield* fetchPremiumRequestUsageStatus(
-          auth,
-          billingAccount,
-          config.security.githubBillingToken,
-          now
-        );
+  const globalPremiumQuota = (() => {
+    const aggregate = snapshot.premiumRequestsGlobal;
+    if (aggregate.meteredAccounts === 0) {
+      if (aggregate.unlimitedAccounts > 0 && aggregate.unavailableAccounts === 0) {
+        return `included across ${aggregate.unlimitedAccounts} account${aggregate.unlimitedAccounts === 1 ? "" : "s"}`;
+      }
 
-  const cachedModelCount = new Set(accounts.flatMap((account) => account.modelIds)).size;
+      return `unavailable${aggregate.unavailableAccounts > 0 ? ` (${aggregate.unavailableAccounts} account${aggregate.unavailableAccounts === 1 ? "" : "s"} unavailable)` : ""}`;
+    }
 
-  const globalPremiumQuota = describeAggregateQuota(
-    usageStatuses.map((status) => status.usage?.quotaSnapshots.premiumInteractions ?? null)
-  );
+    const qualifiers = [
+      `${aggregate.meteredAccounts} metered`,
+      ...(aggregate.unlimitedAccounts > 0
+        ? [`${aggregate.unlimitedAccounts} included`]
+        : []),
+      ...(aggregate.unavailableAccounts > 0
+        ? [`${aggregate.unavailableAccounts} unavailable`]
+        : []),
+    ];
 
-  const rows: StatusRow[] = accounts.map((account) => {
-    const usageStatus = usageByAccountId.get(account.accountId) ?? null;
-    const usageError = usageStatus?.error ?? "";
+    return `${aggregate.used}/${aggregate.entitlement} used, ${aggregate.remaining} remaining (${qualifiers.join(", ")} accounts)`;
+  })();
+
+  const rows: StatusRow[] = snapshot.accounts.map((account) => {
     const premium =
-      usageStatus?.usage === null || usageStatus?.usage === undefined
-        ? usageError.length === 0
+      account.premiumRequests === null
+        ? account.usageError === null || account.usageError.length === 0
           ? "n/a"
           : "error"
-        : compactQuota(usageStatus.usage.quotaSnapshots.premiumInteractions);
+        : compactQuota(account.premiumRequests);
+    const token = account.reauthRequired
+      ? "reauth required"
+      : account.tokenExpiresAt === null
+        ? "missing"
+        : account.tokenRemainingSeconds === 0
+          ? "expired"
+          : account.tokenValid
+            ? `valid ${formatDuration(account.tokenRemainingSeconds)}`
+            : `refresh due ${formatDuration(account.tokenRemainingSeconds)}`;
 
     return {
-      account:
-        account.accountId === runtimeSettings.defaultAccountId
-          ? `${account.label} *`
-          : account.label,
-      api: formatApiHost(account.apiBaseUrl),
+      account: account.defaultAccount ? `${account.githubLogin} *` : account.githubLogin,
+      api: account.apiHost,
       cooldown:
         account.cooldownUntil !== null && account.cooldownUntil.getTime() > now.getTime()
           ? formatRemaining(account.cooldownUntil, now)
@@ -1002,20 +730,20 @@ const runStatusCommand = Effect.gen(function* runStatusCommand() {
       error:
         account.lastError.length > 0
           ? truncate(account.lastError, 48)
-          : usageError.length > 0
-            ? truncate(`quota: ${usageError}`, 48)
+          : account.usageError !== null && account.usageError.length > 0
+            ? truncate(`quota: ${account.usageError}`, 48)
             : "-",
       github: account.githubLogin,
       lastRateLimit: formatAge(account.lastRateLimitedAt, now),
       lastUsed: formatAge(account.lastUsedAt, now),
-      localRequests: formatObservedRequests(account),
-      localTokens: formatObservedTokens(account),
-      models: String(account.modelIds.length),
-      plan: usageStatus?.usage?.plan || "-",
+      localRequests: `${account.localProxyUsage.requests}/${account.localProxyUsage.streams}`,
+      localTokens: `${account.localProxyUsage.inputTokens}/${account.localProxyUsage.outputTokens}`,
+      models: String(account.modelCount),
+      plan: account.plan ?? "-",
       premium,
       priority: String(account.priority),
-      state: accountState(account, now),
-      token: tokenState(account, now, config.upstream.tokenRefreshBufferSeconds),
+      state: account.state.replaceAll("_", " "),
+      token,
     } satisfies StatusRow;
   });
 
@@ -1056,31 +784,34 @@ const runStatusCommand = Effect.gen(function* runStatusCommand() {
     ])
   );
 
-  const quotaSummaryLines = [
-    `Premium requests (global): ${globalPremiumQuota}`,
-  ];
-
   const billingSummaryLines =
-    primaryBillingUsage?.report === null || primaryBillingUsage?.report === undefined
+    snapshot.billing.summary === null
       ? [
-          `Premium request report: unavailable${primaryBillingUsage?.error ? ` (${primaryBillingUsage.error})` : ""}`,
-]
+          `Premium request report: unavailable${snapshot.billing.error ? ` (${snapshot.billing.error})` : ""}`,
+        ]
       : [
-          `Premium request report: ${describePremiumRequestReport(primaryBillingUsage.report)}`,
-]
+          `Premium request report: ${snapshot.billing.summary}`,
+          ...(snapshot.billing.topModels.length === 0
+            ? []
+            : [
+                `Premium request models: ${snapshot.billing.topModels
+                  .map((model) => `${model.model} ${formatQuantity(model.quantity)}`)
+                  .join(", ")}`,
+              ]),
+        ];
 
   const summaryLines = [
     `${APP_NAME} v${APP_VERSION}`,
     `Authenticated: yes`,
-    `Accounts: ${accounts.length} total, ${enabledAccounts.length} enabled, ${healthyAccounts.length} healthy, ${coolingDownAccounts.length} cooling down, ${reauthAccounts.length} reauth required`,
-    `Rotation strategy: ${runtimeSettings.rotationStrategy}`,
-    `Token status: ${longestValidTokenLifetime > 0 ? `valid (${formatDuration(longestValidTokenLifetime)} remaining)` : "no valid Copilot token cached"}`,
-    `Model catalog: ${modelRefresh.mergedModelCount ?? cachedModelCount} ${modelRefresh.mergedModelCount === null ? "cached" : "live"}`,
-    `Catalog refresh: ${modelRefresh.error === null ? "ok" : `failed (${modelRefresh.error})`}`,
-    ...quotaSummaryLines,
+    `Accounts: ${snapshot.counts.total} total, ${snapshot.counts.enabled} enabled, ${snapshot.counts.healthy} healthy, ${snapshot.counts.coolingDown} cooling down, ${snapshot.counts.reauthRequired} reauth required`,
+    `Rotation strategy: ${snapshot.rotationStrategy}`,
+    `Token status: ${snapshot.longestValidTokenLifetimeSeconds > 0 ? `valid (${formatDuration(snapshot.longestValidTokenLifetimeSeconds)} remaining)` : "no valid Copilot token cached"}`,
+    `Model catalog: ${snapshot.modelCatalog.count} ${snapshot.modelCatalog.live ? "live" : "cached"}`,
+    `Catalog refresh: ${snapshot.modelCatalog.refreshError === null ? "ok" : `failed (${snapshot.modelCatalog.refreshError})`}`,
+    `Premium requests (global): ${globalPremiumQuota}`,
     ...billingSummaryLines,
     "Global token usage: unavailable — GitHub's Copilot and billing APIs expose request/quota data, not prompt/completion token totals.",
-    `Local proxy usage: ${describeAggregateObservedUsage(accounts)}`,
+    `Local proxy usage: ${snapshot.localProxyUsage.requests} requests, ${snapshot.localProxyUsage.streams} streams, ${snapshot.localProxyUsage.inputTokens} input tokens, ${snapshot.localProxyUsage.outputTokens} output tokens`,
     "",
     ...tableLines,
   ];

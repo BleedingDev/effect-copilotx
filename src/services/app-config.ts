@@ -32,7 +32,7 @@ export interface AppConfigShape {
     readonly corsOrigins: readonly string[];
     readonly forceModels: readonly string[];
     readonly githubBillingToken: string | undefined;
-    readonly importApiKey: string | undefined;
+    readonly adminApiKey: string | undefined;
     readonly publicPaths: readonly string[];
     readonly tokenEncryptionKey: Redacted.Redacted;
     readonly tokenEncryptionKeyId: string;
@@ -101,7 +101,7 @@ const configSchema = Config.all({
     ),
     forceModels: stringList("COPILOTX_FORCE_MODELS", ""),
     githubBillingToken: optionalString("COPILOTX_GITHUB_BILLING_TOKEN"),
-    importApiKey: optionalString("COPILOTX_IMPORT_API_KEY"),
+    adminApiKey: optionalString("COPILOTX_ADMIN_API_KEY"),
     publicPaths: stringList("COPILOTX_PUBLIC_PATHS", "/,/health,/readyz"),
     tokenEncryptionKey: Config.redacted("COPILOTX_TOKEN_ENCRYPTION_KEY"),
     tokenEncryptionKeyId: Config.string(

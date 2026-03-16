@@ -134,16 +134,16 @@ export const authorizeRequest = (
   );
 };
 
-export const authorizeImportRequest = (
+export const authorizeAdminRequest = (
   request: HttpServerRequest,
   config: AppConfigShape
 ): HttpServerResponse.HttpServerResponse | null => {
-  const configuredImportApiKey = config.security.importApiKey;
-  if (configuredImportApiKey === undefined || configuredImportApiKey.length === 0) {
+  const configuredAdminApiKey = config.security.adminApiKey;
+  if (configuredAdminApiKey === undefined || configuredAdminApiKey.length === 0) {
     return HttpServerResponse.jsonUnsafe(
       {
         error: {
-          message: "GitHub token import is disabled.",
+          message: "Admin API is disabled.",
           type: "not_found",
         },
       },
@@ -155,7 +155,7 @@ export const authorizeImportRequest = (
   }
 
   const presentedApiKey = extractPresentedApiKey(request);
-  if (presentedApiKey === configuredImportApiKey) {
+  if (presentedApiKey === configuredAdminApiKey) {
     return null;
   }
 
@@ -163,7 +163,7 @@ export const authorizeImportRequest = (
     {
       error: {
         message:
-          "Invalid or missing import API key. Set Authorization: Bearer <your-import-key> header.",
+          "Invalid or missing admin API key. Set Authorization: Bearer <your-admin-key> header.",
         type: "authentication_error",
       },
     },
