@@ -604,9 +604,18 @@ const runConfigCommand = (options: ConfigOptions) =>
       `Oh My Pi smol model: ${ompSmallModel}`,
       ...results.flatMap((result) => [
         `${result.target}: ${result.configPath ?? "no config file"}`,
-        ...(result.launcherPath === null ? [] : [`${result.target} launcher: ${result.launcherPath}`]),
+        ...(result.launcherPath === null
+          ? []
+          : [
+              `${result.target} launcher (POSIX): ${result.launcherPath}`,
+              `${result.target} launcher (Windows cmd): ${result.launcherPath}.cmd`,
+              `${result.target} launcher (PowerShell): ${result.launcherPath}.ps1`,
+            ]),
       ]),
-      'Add to PATH if needed: export PATH="$HOME/.copilotx/bin:$PATH"',
+      'Bash/Zsh PATH: export PATH="$HOME/.copilotx/bin:$PATH"',
+      'Fish PATH: fish_add_path ~/.copilotx/bin',
+      'PowerShell PATH (session): $env:Path = "$HOME/.copilotx/bin;$env:Path"',
+      'PowerShell PATH (persist): [Environment]::SetEnvironmentVariable("Path", "$HOME/.copilotx/bin;" + [Environment]::GetEnvironmentVariable("Path", "User"), "User")',
       "Factory Droid launcher: droid-copilotx",
       "Codex launcher: codex-copilotx",
       "Oh My Pi launcher: omp-copilotx",

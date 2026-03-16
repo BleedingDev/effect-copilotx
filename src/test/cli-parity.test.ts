@@ -141,12 +141,22 @@ describe("CLI parity helpers", () => {
           );
 
           const configContent = await readFile(configPath, "utf8");
+          if (result.launcherPath === null) {
+            throw new Error("Expected Codex launcher path.");
+          }
+          const launcher = await readFile(result.launcherPath, "utf8");
+          const launcherCmd = await readFile(`${result.launcherPath}.cmd`, "utf8");
+          const launcherPs1 = await readFile(`${result.launcherPath}.ps1`, "utf8");
+
           expect(result.configPath).toBe(configPath);
           expect(result.launcherPath).toContain("codex-copilotx");
           expect(configContent).toContain("[model_providers.copilotx]");
           expect(configContent).toContain('experimental_bearer_token = "test-key"');
           expect(configContent).toContain('[profiles.copilotx]');
           expect(configContent).toContain('model = "gpt-5.4"');
+          expect(launcher).toContain('exec codex --profile copilotx "$@"');
+          expect(launcherCmd).toContain("codex --profile copilotx %*");
+          expect(launcherPs1).toContain("& codex --profile copilotx @args");
         } finally {
           await rm(homeDir, { force: true, recursive: true });
         }
@@ -185,6 +195,13 @@ describe("CLI parity helpers", () => {
             (model) => model.displayName === "CopilotX Remote"
           );
 
+          if (result.launcherPath === null) {
+            throw new Error("Expected Factory Droid launcher path.");
+          }
+          const launcher = await readFile(result.launcherPath, "utf8");
+          const launcherCmd = await readFile(`${result.launcherPath}.cmd`, "utf8");
+          const launcherPs1 = await readFile(`${result.launcherPath}.ps1`, "utf8");
+
           expect(result.configPath).toBe(settingsPath);
           expect(result.launcherPath).toContain("droid-copilotx");
           expect(parsed.ui).toBe("dark");
@@ -194,6 +211,11 @@ describe("CLI parity helpers", () => {
             model: "claude-opus-4.6",
             provider: "anthropic",
           });
+          expect(launcher).toContain('exec droid -m custom-model "$@"');
+          expect(launcherCmd).toContain('if /I "%~1"=="exec" (');
+          expect(launcherCmd).toContain("droid exec -m custom-model %*");
+          expect(launcherPs1).toContain("& droid exec -m custom-model @remaining");
+          expect(launcherPs1).toContain("& droid -m custom-model @args");
         } finally {
           await rm(homeDir, { force: true, recursive: true });
         }
@@ -221,10 +243,16 @@ describe("CLI parity helpers", () => {
           }
 
           const launcher = await readFile(result.launcherPath, "utf8");
+          const launcherCmd = await readFile(`${result.launcherPath}.cmd`, "utf8");
+          const launcherPs1 = await readFile(`${result.launcherPath}.ps1`, "utf8");
           expect(launcher).toContain('export OPENAI_BASE_URL="https://copilotx.example.com/v1"');
           expect(launcher).toContain('export OPENAI_API_KEY="omp-key"');
           expect(launcher).toContain('export PI_SMOL_MODEL="gpt-5-mini"');
           expect(launcher).toContain('exec omp --model "gpt-5.4" "$@"');
+          expect(launcherCmd).toContain('set "OPENAI_BASE_URL=https://copilotx.example.com/v1"');
+          expect(launcherCmd).toContain("omp --model gpt-5.4 %*");
+          expect(launcherPs1).toContain('$env:OPENAI_API_KEY = "omp-key"');
+          expect(launcherPs1).toContain('& omp --model "gpt-5.4" @args');
         } finally {
           await rm(homeDir, { force: true, recursive: true });
         }

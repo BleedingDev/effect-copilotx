@@ -101,17 +101,26 @@ const mergeManagedBlock = (existingContent: string | null, body: string): string
   return `${trimmed}\n\n${nextBlock}`;
 };
 
+interface LauncherScriptBundle {
+  readonly posix: string;
+  readonly cmd: string;
+  readonly powerShell: string;
+}
+
 const writeExecutableScript = async (
   name: string,
-  content: string,
+  scripts: LauncherScriptBundle,
   homeDir?: string
 ): Promise<string> => {
   const path = join(getCopilotXBinDir(homeDir), name);
   await ensureParentDir(path);
-  await writeFile(path, content, "utf8");
+  await writeFile(path, scripts.posix, "utf8");
   await chmod(path, 0o755);
+  await writeFile(`${path}.cmd`, scripts.cmd, "utf8");
+  await writeFile(`${path}.ps1`, scripts.powerShell, "utf8");
   return path;
 };
+
 
 const openAiBaseUrl = (baseUrl: string): string => new URL("/v1", baseUrl).toString();
 
@@ -258,7 +267,12 @@ export const writeCodexCliSetup = async (
 
   const launcherPath = await writeExecutableScript(
     "codex-copilotx",
-    `#!/bin/sh\nexec codex --profile ${codexProfileName} "$@"\n`,
+    {
+      cmd: `@echo off\r\nsetlocal\r\ncodex --profile ${codexProfileName} %*\r\n`,
+      posix: `#!/bin/sh\nexec codex --profile ${codexProfileName} "$@"\n`,
+      powerShell:
+        `#!/usr/bin/env pwsh\n$ErrorActionPreference = "Stop"\n& codex --profile ${codexProfileName} @args\nexit $LASTEXITCODE\n`,
+    },
     homeDir
   );
 
@@ -317,15 +331,41 @@ export const writeFactoryDroidSetup = async (
 
   const launcherPath = await writeExecutableScript(
     "droid-copilotx",
-    [
-      "#!/bin/sh",
-      'if [ "$1" = "exec" ]; then',
-      "  shift",
-      '  exec droid exec -m custom-model "$@"',
-      "fi",
-      'exec droid -m custom-model "$@"',
-      "",
-    ].join("\n"),
+    {
+      cmd: [
+        "@echo off",
+        "setlocal",
+        "if /I \"%~1\"==\"exec\" (",
+        "  shift",
+        "  droid exec -m custom-model %*",
+        "  exit /b %ERRORLEVEL%",
+        ")",
+        "droid -m custom-model %*",
+        "exit /b %ERRORLEVEL%",
+        "",
+      ].join("\r\n"),
+      posix: [
+        "#!/bin/sh",
+        'if [ "$1" = "exec" ]; then',
+        "  shift",
+        '  exec droid exec -m custom-model "$@"',
+        "fi",
+        'exec droid -m custom-model "$@"',
+        "",
+      ].join("\n"),
+      powerShell: [
+        "#!/usr/bin/env pwsh",
+        '$ErrorActionPreference = "Stop"',
+        'if ($args.Count -gt 0 -and $args[0].ToLowerInvariant() -eq "exec") {',
+        "  $remaining = if ($args.Count -gt 1) { $args[1..($args.Count - 1)] } else { @() }",
+        "  & droid exec -m custom-model @remaining",
+        "  exit $LASTEXITCODE",
+        "}",
+        "& droid -m custom-model @args",
+        "exit $LASTEXITCODE",
+        "",
+      ].join("\n"),
+    },
     homeDir
   );
 
@@ -342,16 +382,42 @@ export const writeOhMyPiSetup = async (
 ): Promise<AgentSetupResult> => {
   const launcherPath = await writeExecutableScript(
     "omp-copilotx",
-    [
-      "#!/bin/sh",
-      `export OPENAI_BASE_URL=${tomlString(openAiBaseUrl(input.baseUrl))}`,
-      `export OPENAI_API_KEY=${tomlString(input.apiKey)}`,
-      `export PI_SMOL_MODEL=${tomlString(input.smallModel)}`,
-      `export PI_SLOW_MODEL=${tomlString(input.model)}`,
-      `export PI_PLAN_MODEL=${tomlString(input.model)}`,
-      `exec omp --model ${tomlString(input.model)} "$@"`,
-      "",
-    ].join("\n"),
+    {
+      cmd: [
+        "@echo off",
+        "setlocal",
+        `set "OPENAI_BASE_URL=${openAiBaseUrl(input.baseUrl)}"`,
+        `set "OPENAI_API_KEY=${input.apiKey}"`,
+        `set "PI_SMOL_MODEL=${input.smallModel}"`,
+        `set "PI_SLOW_MODEL=${input.model}"`,
+        `set "PI_PLAN_MODEL=${input.model}"`,
+        `omp --model ${input.model} %*`,
+        "exit /b %ERRORLEVEL%",
+        "",
+      ].join("\r\n"),
+      posix: [
+        "#!/bin/sh",
+        `export OPENAI_BASE_URL=${tomlString(openAiBaseUrl(input.baseUrl))}`,
+        `export OPENAI_API_KEY=${tomlString(input.apiKey)}`,
+        `export PI_SMOL_MODEL=${tomlString(input.smallModel)}`,
+        `export PI_SLOW_MODEL=${tomlString(input.model)}`,
+        `export PI_PLAN_MODEL=${tomlString(input.model)}`,
+        `exec omp --model ${tomlString(input.model)} "$@"`,
+        "",
+      ].join("\n"),
+      powerShell: [
+        "#!/usr/bin/env pwsh",
+        '$ErrorActionPreference = "Stop"',
+        `$env:OPENAI_BASE_URL = ${tomlString(openAiBaseUrl(input.baseUrl))}`,
+        `$env:OPENAI_API_KEY = ${tomlString(input.apiKey)}`,
+        `$env:PI_SMOL_MODEL = ${tomlString(input.smallModel)}`,
+        `$env:PI_SLOW_MODEL = ${tomlString(input.model)}`,
+        `$env:PI_PLAN_MODEL = ${tomlString(input.model)}`,
+        `& omp --model ${tomlString(input.model)} @args`,
+        "exit $LASTEXITCODE",
+        "",
+      ].join("\n"),
+    },
     homeDir
   );
 

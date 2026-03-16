@@ -56,13 +56,24 @@ copilotx config all \
 
 That command configures:
 - Claude Code via `~/.claude/settings.json`
-- Codex CLI via `~/.codex/config.toml` plus `~/.copilotx/bin/codex-copilotx`
-- Factory Droid via `~/.factory/settings.local.json` plus `~/.copilotx/bin/droid-copilotx`
-- Oh My Pi via `~/.copilotx/bin/omp-copilotx`
+- Codex CLI via `~/.codex/config.toml` plus launchers:
+  - POSIX: `~/.copilotx/bin/codex-copilotx`
+  - Windows cmd: `~/.copilotx/bin/codex-copilotx.cmd`
+  - PowerShell: `~/.copilotx/bin/codex-copilotx.ps1`
+- Factory Droid via `~/.factory/settings.local.json` plus launchers:
+  - POSIX: `~/.copilotx/bin/droid-copilotx`
+  - Windows cmd: `~/.copilotx/bin/droid-copilotx.cmd`
+  - PowerShell: `~/.copilotx/bin/droid-copilotx.ps1`
+- Oh My Pi launchers:
+  - POSIX: `~/.copilotx/bin/omp-copilotx`
+  - Windows cmd: `~/.copilotx/bin/omp-copilotx.cmd`
+  - PowerShell: `~/.copilotx/bin/omp-copilotx.ps1`
 
-> Add launchers to your shell once:
-
-> `export PATH="$HOME/.copilotx/bin:$PATH"`
+Add launchers to PATH once (pick your shell):
+- Bash/Zsh: `export PATH="$HOME/.copilotx/bin:$PATH"`
+- Fish: `fish_add_path ~/.copilotx/bin`
+- PowerShell (session): `$env:Path = "$HOME/.copilotx/bin;$env:Path"`
+- PowerShell (persist): `[Environment]::SetEnvironmentVariable("Path", "$HOME/.copilotx/bin;" + [Environment]::GetEnvironmentVariable("Path", "User"), "User")`
 
 > Individual targets are also supported: `claude-code`, `codex-cli`, `factory-droid`, `oh-my-pi`, `github-copilot-cli`.
 
