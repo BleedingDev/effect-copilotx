@@ -18,6 +18,27 @@ interface AccountUsageStatus {
   readonly usage: CopilotUsageOverview | null;
 }
 
+const accountUsageOverviewTimeoutMs = 800;
+const modelRefreshTimeoutMs = 1_200;
+const billingUsageTimeoutMs = 1_200;
+
+const describeUsageLookupError = (error: unknown, timeoutMs: number): string => {
+  if (error instanceof Error) {
+    const normalized = error.message.toLowerCase();
+    if (
+      error.name === "AbortError" ||
+      error.name === "TimeoutError" ||
+      normalized.includes("aborted") ||
+      normalized.includes("timed out")
+    ) {
+      return `usage lookup timed out after ${timeoutMs}ms`;
+    }
+  }
+
+  return describeUnknownError(error);
+};
+
+
 export interface AdminStatusQuotaAggregate {
   readonly entitlement: number;
   readonly meteredAccounts: number;
@@ -276,6 +297,14 @@ export const collectAdminStatusSnapshot = Effect.gen(
         error: null as string | null,
         mergedModelCount: models.length,
       })),
+      Effect.timeoutOrElse({
+        duration: `${modelRefreshTimeoutMs} millis`,
+        onTimeout: () =>
+          Effect.succeed({
+            error: `model catalog refresh timed out after ${modelRefreshTimeoutMs}ms`,
+            mergedModelCount: null as number | null,
+          }),
+      }),
       Effect.catch((error) =>
         Effect.succeed({
           error: describeUnknownError(error),
@@ -287,8 +316,9 @@ export const collectAdminStatusSnapshot = Effect.gen(
     accounts = yield* repository.listAccounts();
 
     const usageStatuses = yield* Effect.all(
-      accounts.map((account) =>
-        auth.fetchUsage(account.githubToken).pipe(
+      accounts.map((account) => {
+        const signal = AbortSignal.timeout(accountUsageOverviewTimeoutMs);
+        return auth.fetchUsage(account.githubToken, signal).pipe(
           Effect.map(
             (usage) =>
               ({
@@ -300,12 +330,12 @@ export const collectAdminStatusSnapshot = Effect.gen(
           Effect.catch((error) =>
             Effect.succeed({
               accountId: account.accountId,
-              error: describeUnknownError(error),
+              error: describeUsageLookupError(error, accountUsageOverviewTimeoutMs),
               usage: null,
             } satisfies AccountUsageStatus)
           )
-        )
-      )
+        );
+      })
     );
 
     const usageByAccountId = new Map(
@@ -337,6 +367,7 @@ export const collectAdminStatusSnapshot = Effect.gen(
       accounts.find((account) => account.accountId === runtimeSettings.defaultAccountId) ??
       accounts[0] ??
       null;
+    const billingUsageSignal = AbortSignal.timeout(billingUsageTimeoutMs);
     const billingUsage =
       billingAccount === null
         ? null
@@ -344,7 +375,8 @@ export const collectAdminStatusSnapshot = Effect.gen(
             auth,
             billingAccount,
             config.security.githubBillingToken,
-            now
+            now,
+            billingUsageSignal
           );
 
     const snapshotAccounts = accounts.map((account) => {

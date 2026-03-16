@@ -61,14 +61,15 @@ const buildTokenCandidates = (
 const resolveUsername = (
   auth: BillingUsageAuth,
   token: string,
-  preferredUsername: string | undefined
+  preferredUsername: string | undefined,
+  signal: AbortSignal | undefined
 ): Effect.Effect<string, Error> => {
   const username = preferredUsername?.trim() ?? "";
   if (username.length > 0) {
     return Effect.succeed(username);
   }
 
-  return auth.fetchGitHubUser(token).pipe(
+  return auth.fetchGitHubUser(token, signal).pipe(
     Effect.map((user) => user.login.trim()),
     Effect.flatMap((login) =>
       login.length > 0
@@ -82,16 +83,23 @@ export const fetchPremiumRequestUsageStatus = (
   auth: BillingUsageAuth,
   account: BillingUsageAccount,
   billingToken: string | undefined,
-  now: Date
+  now: Date,
+  signal?: AbortSignal
 ): Effect.Effect<PremiumRequestUsageStatus, never> =>
   Effect.gen(function* () {
     let lastError: string | null = null;
 
     for (const [token, preferredUsername] of buildTokenCandidates(account, billingToken)) {
-      const attempt = yield* resolveUsername(auth, token, preferredUsername).pipe(
+      const attempt = yield* resolveUsername(
+        auth,
+        token,
+        preferredUsername,
+        signal
+      ).pipe(
         Effect.flatMap((username) =>
           auth.fetchPremiumRequestUsage(username, token, {
             month: now.getUTCMonth() + 1,
+            ...(signal === undefined ? {} : { signal }),
             year: now.getUTCFullYear(),
           })
         ),
