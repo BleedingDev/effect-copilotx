@@ -16,14 +16,20 @@ import { runServer } from "#/http/server-runner";
 import { AccountRepository } from "#/services/account-repository";
 import {
   buildClaudeCodeEnv,
+  codexModelPreferences,
   extractModelIdsFromOpenAiList,
+  ompModelPreferences,
+  ompSmallModelPreferences,
   primaryModelPreferences,
   readProjectApiKey,
-  resolveClaudeBaseUrl,
+  resolveAgentBaseUrl,
   selectPreferredModel,
   smallModelPreferences,
   writeClaudeCodeSettings,
-} from "#/services/claude-code-config";
+  writeCodexCliSetup,
+  writeFactoryDroidSetup,
+  writeOhMyPiSetup,
+} from "#/services/agent-config";
 import {
   formatImportedAccount,
   importGitHubToken,
@@ -95,7 +101,7 @@ Usage:
   copilotx auth login [--token TOKEN]
   copilotx auth status
   copilotx auth logout
-  copilotx config claude-code [--base-url URL] [--api-key KEY] [--model ID] [--small-model ID]
+  copilotx config <claude-code|codex-cli|factory-droid|oh-my-pi|all> [--base-url URL] [--api-key KEY] [--model ID] [--small-model ID]
 `;
 
 const parseServeOptions = (args: readonly string[]): ServeOptions => {
@@ -316,6 +322,67 @@ const detailedQuota = (snapshot: CopilotQuotaSnapshot | null | undefined): strin
   return `${used}/${snapshot.entitlement} used, ${snapshot.remaining} remaining (${snapshot.percentRemaining.toFixed(1)}% left${overageSuffix})`;
 };
 
+interface AggregateQuotaSnapshot {
+  readonly accounted: number;
+  readonly entitlement: number;
+  readonly remaining: number;
+  readonly unavailable: number;
+  readonly unlimited: number;
+}
+
+const aggregateQuotaSnapshots = (
+  snapshots: readonly (CopilotQuotaSnapshot | null | undefined)[]
+): AggregateQuotaSnapshot =>
+  snapshots.reduce<AggregateQuotaSnapshot>(
+    (summary, snapshot) => {
+      if (snapshot === null || snapshot === undefined) {
+        return { ...summary, unavailable: summary.unavailable + 1 };
+      }
+
+      if (snapshot.unlimited) {
+        return { ...summary, unlimited: summary.unlimited + 1 };
+      }
+
+      return {
+        accounted: summary.accounted + 1,
+        entitlement: summary.entitlement + snapshot.entitlement,
+        remaining: summary.remaining + snapshot.remaining,
+        unavailable: summary.unavailable,
+        unlimited: summary.unlimited,
+      };
+    },
+    {
+      accounted: 0,
+      entitlement: 0,
+      remaining: 0,
+      unavailable: 0,
+      unlimited: 0,
+    }
+  );
+
+const describeAggregateQuota = (
+  snapshots: readonly (CopilotQuotaSnapshot | null | undefined)[]
+): string => {
+  const aggregate = aggregateQuotaSnapshots(snapshots);
+
+  if (aggregate.accounted === 0) {
+    if (aggregate.unlimited > 0 && aggregate.unavailable === 0) {
+      return `included across ${aggregate.unlimited} account${aggregate.unlimited === 1 ? "" : "s"}`;
+    }
+
+    return `unavailable${aggregate.unavailable > 0 ? ` (${aggregate.unavailable} account${aggregate.unavailable === 1 ? "" : "s"} unavailable)` : ""}`;
+  }
+
+  const used = Math.max(aggregate.entitlement - aggregate.remaining, 0);
+  const qualifierParts = [
+    `${aggregate.accounted} metered`,
+    ...(aggregate.unlimited > 0 ? [`${aggregate.unlimited} included`] : []),
+    ...(aggregate.unavailable > 0 ? [`${aggregate.unavailable} unavailable`] : []),
+  ];
+
+  return `${used}/${aggregate.entitlement} used, ${aggregate.remaining} remaining (${qualifierParts.join(", ")} accounts)`;
+};
+
 const formatObservedRequests = (account: AccountSummary): string =>
   `${account.successfulRequestCount}/${account.successfulStreamCount}`;
 
@@ -324,6 +391,25 @@ const formatObservedTokens = (account: AccountSummary): string =>
 
 const describeObservedUsage = (account: AccountSummary): string =>
   `${account.successfulRequestCount} requests, ${account.successfulStreamCount} streams, ${account.inputTokenCount} input tokens, ${account.outputTokenCount} output tokens`;
+
+const describeAggregateObservedUsage = (accounts: readonly AccountSummary[]): string => {
+  const totals = accounts.reduce(
+    (summary, account) => ({
+      inputTokens: summary.inputTokens + account.inputTokenCount,
+      outputTokens: summary.outputTokens + account.outputTokenCount,
+      requests: summary.requests + account.successfulRequestCount,
+      streams: summary.streams + account.successfulStreamCount,
+    }),
+    {
+      inputTokens: 0,
+      outputTokens: 0,
+      requests: 0,
+      streams: 0,
+    }
+  );
+
+  return `${totals.requests} requests, ${totals.streams} streams, ${totals.inputTokens} input tokens, ${totals.outputTokens} output tokens`;
+};
 
 const formatQuantity = (value: number): string => {
   if (!Number.isFinite(value)) {
@@ -558,11 +644,31 @@ const fetchRemoteModelIds = async (
   return extractModelIdsFromOpenAiList(await response.json());
 };
 
+const resolveConfigTargets = (target: string) => {
+  switch (target) {
+    case "all":
+      return [
+        "claude-code",
+        "codex-cli",
+        "factory-droid",
+        "oh-my-pi",
+      ] as const;
+    case "claude-code":
+    case "codex-cli":
+    case "factory-droid":
+    case "oh-my-pi":
+      return [target] as const;
+    default:
+      return null;
+  }
+};
+
 const runConfigCommand = (options: ConfigOptions) =>
   Effect.gen(function* runConfigCommand() {
-    if (options.target !== "claude-code") {
+    const targets = resolveConfigTargets(options.target);
+    if (targets === null) {
       return yield* failCli(
-        `Unknown config target: ${options.target}\n\nAvailable targets: claude-code`
+        `Unknown config target: ${options.target}\n\nAvailable targets: claude-code, codex-cli, factory-droid, oh-my-pi, all`
       );
     }
 
@@ -571,7 +677,7 @@ const runConfigCommand = (options: ConfigOptions) =>
       catch: (error) => new Error(describeUnknownError(error), { cause: error }),
     }).pipe(Effect.catch(() => Effect.succeed(null)));
 
-    const baseUrl = resolveClaudeBaseUrl(options.baseUrl, discoveredServer);
+    const baseUrl = resolveAgentBaseUrl(options.baseUrl, discoveredServer);
     const isRemote = options.baseUrl !== undefined;
     const apiKey =
       options.apiKey?.trim() ||
@@ -579,15 +685,18 @@ const runConfigCommand = (options: ConfigOptions) =>
         try: async () => readProjectApiKey(),
         catch: (error) => new Error(describeUnknownError(error), { cause: error }),
       }).pipe(Effect.catch(() => Effect.succeed(undefined))));
+    const requiresApiKey = isRemote || targets.some((target) => target !== "claude-code");
 
-    if (isRemote && (apiKey === undefined || apiKey.length === 0)) {
+    if (requiresApiKey && (apiKey === undefined || apiKey.length === 0)) {
       return yield* failCli(
-        "Remote mode requires --api-key or COPILOTX_API_KEY in the current environment or .env file."
+        "Remote agent setup requires --api-key or COPILOTX_API_KEY in the current environment or .env file."
       );
     }
 
     const needsModelDiscovery =
-      options.model === undefined || options.smallModel === undefined;
+      options.model === undefined ||
+      options.smallModel === undefined ||
+      targets.some((target) => target !== "claude-code");
     const modelIds = needsModelDiscovery
       ? yield* Effect.tryPromise({
           try: async () => fetchRemoteModelIds(baseUrl, apiKey),
@@ -601,32 +710,120 @@ const runConfigCommand = (options: ConfigOptions) =>
     const smallModel =
       options.smallModel?.trim() ||
       selectPreferredModel(modelIds, smallModelPreferences, "gpt-5-mini");
+    const codexModel = selectPreferredModel(modelIds, codexModelPreferences, "gpt-5.4");
+    const ompModel = selectPreferredModel(modelIds, ompModelPreferences, codexModel);
+    const ompSmallModel =
+      options.smallModel?.trim() ||
+      selectPreferredModel(modelIds, ompSmallModelPreferences, "gpt-5-mini");
     const authToken = apiKey ?? "copilotx";
-    const envConfig = buildClaudeCodeEnv({
-      apiKey: authToken,
-      baseUrl,
-      model: primaryModel,
-      smallModel,
-    });
-    const configPath = yield* Effect.tryPromise({
-      try: async () =>
-        writeClaudeCodeSettings({
-          apiKey: authToken,
-          baseUrl,
-          model: primaryModel,
-          smallModel,
-        }),
-      catch: (error) => new Error(describeUnknownError(error), { cause: error }),
-    });
+    const results = [] as Array<{
+      readonly configPath: string | null;
+      readonly launcherPath: string | null;
+      readonly target: string;
+    }>;
+
+    if (targets.includes("claude-code")) {
+      const envConfig = buildClaudeCodeEnv({
+        apiKey: authToken,
+        baseUrl,
+        model: primaryModel,
+        smallModel,
+      });
+      const configPath = yield* Effect.tryPromise({
+        try: async () =>
+          writeClaudeCodeSettings({
+            apiKey: authToken,
+            baseUrl,
+            model: primaryModel,
+            smallModel,
+          }),
+        catch: (error) => new Error(describeUnknownError(error), { cause: error }),
+      });
+      results.push({ configPath, launcherPath: null, target: "claude-code" });
+
+      if (targets.length === 1) {
+        const summaryLines = [
+          `Claude Code configured (${isRemote ? "remote" : "local"})`,
+          `Config: ${configPath}`,
+          `URL: ${baseUrl}`,
+          `Model: ${primaryModel}`,
+          `Small model: ${smallModel}`,
+          `Auth token: ${apiKey === undefined ? "placeholder/local" : "configured"}`,
+          `Env keys: ${Object.keys(envConfig).join(", ")}`,
+        ];
+
+        if (needsModelDiscovery && modelIds.length === 0) {
+          summaryLines.push(
+            "Model discovery: unavailable, using configured or fallback defaults."
+          );
+        }
+
+        return yield* Console.log(summaryLines.join("\n"));
+      }
+    }
+
+    if (targets.includes("codex-cli") && apiKey !== undefined) {
+      results.push(
+        yield* Effect.tryPromise({
+          try: async () =>
+            writeCodexCliSetup({
+              apiKey,
+              baseUrl,
+              model: codexModel,
+              smallModel,
+            }),
+          catch: (error) => new Error(describeUnknownError(error), { cause: error }),
+        })
+      );
+    }
+
+    if (targets.includes("factory-droid") && apiKey !== undefined) {
+      results.push(
+        yield* Effect.tryPromise({
+          try: async () =>
+            writeFactoryDroidSetup({
+              apiKey,
+              baseUrl,
+              model: primaryModel,
+              smallModel,
+            }),
+          catch: (error) => new Error(describeUnknownError(error), { cause: error }),
+        })
+      );
+    }
+
+    if (targets.includes("oh-my-pi") && apiKey !== undefined) {
+      results.push(
+        yield* Effect.tryPromise({
+          try: async () =>
+            writeOhMyPiSetup({
+              apiKey,
+              baseUrl,
+              model: ompModel,
+              smallModel: ompSmallModel,
+            }),
+          catch: (error) => new Error(describeUnknownError(error), { cause: error }),
+        })
+      );
+    }
 
     const summaryLines = [
-      `Claude Code configured (${isRemote ? "remote" : "local"})`,
-      `Config: ${configPath}`,
+      `Agent integrations configured (${isRemote ? "remote" : "local"})`,
+      `Targets: ${targets.join(", ")}`,
       `URL: ${baseUrl}`,
-      `Model: ${primaryModel}`,
-      `Small model: ${smallModel}`,
-      `Auth token: ${apiKey === undefined ? "placeholder/local" : "configured"}`,
-      `Env keys: ${Object.keys(envConfig).join(", ")}`,
+      `Claude model: ${primaryModel}`,
+      `Claude small model: ${smallModel}`,
+      `Codex model: ${codexModel}`,
+      `Oh My Pi model: ${ompModel}`,
+      `Oh My Pi smol model: ${ompSmallModel}`,
+      ...results.flatMap((result) => [
+        `${result.target}: ${result.configPath ?? "no config file"}`,
+        ...(result.launcherPath === null ? [] : [`${result.target} launcher: ${result.launcherPath}`]),
+      ]),
+      'Add to PATH if needed: export PATH="$HOME/.copilotx/bin:$PATH"',
+      "Factory Droid launcher: droid-copilotx",
+      "Codex launcher: codex-copilotx",
+      "Oh My Pi launcher: omp-copilotx",
     ];
 
     if (needsModelDiscovery && modelIds.length === 0) {
@@ -762,25 +959,25 @@ const runStatusCommand = Effect.gen(function* runStatusCommand() {
     );
   const longestValidTokenLifetime =
     validTokenLifetimes.length === 0 ? 0 : Math.max(...validTokenLifetimes);
-  const defaultAccount = accounts.find(
-    (account) => account.accountId === runtimeSettings.defaultAccountId
-  );
-  const primaryAccount = defaultAccount ?? accounts[0] ?? null;
-  const primaryUsage =
-    primaryAccount === null
-      ? null
-      : (usageByAccountId.get(primaryAccount.accountId) ?? null);
+  const billingAccount =
+    accounts.find((account) => account.accountId === runtimeSettings.defaultAccountId) ??
+    accounts[0] ??
+    null;
   const primaryBillingUsage =
-    primaryAccount === null
+    billingAccount === null
       ? null
       : yield* fetchPremiumRequestUsageStatus(
           auth,
-          primaryAccount,
+          billingAccount,
           config.security.githubBillingToken,
           now
         );
 
   const cachedModelCount = new Set(accounts.flatMap((account) => account.modelIds)).size;
+
+  const globalPremiumQuota = describeAggregateQuota(
+    usageStatuses.map((status) => status.usage?.quotaSnapshots.premiumInteractions ?? null)
+  );
 
   const rows: StatusRow[] = accounts.map((account) => {
     const usageStatus = usageByAccountId.get(account.accountId) ?? null;
@@ -859,43 +1056,31 @@ const runStatusCommand = Effect.gen(function* runStatusCommand() {
     ])
   );
 
-  const quotaSummaryLines =
-    primaryUsage?.usage === null || primaryUsage?.usage === undefined
-      ? [
-          `Premium requests: unavailable${primaryUsage?.error ? ` (${primaryUsage.error})` : ""}`,
-        ]
-      : [
-          `Copilot plan: ${primaryUsage.usage.plan || "-"}`,
-          `Premium requests: ${detailedQuota(primaryUsage.usage.quotaSnapshots.premiumInteractions)}`,
-          `Chat requests: ${detailedQuota(primaryUsage.usage.quotaSnapshots.chat)}`,
-          `Completions: ${detailedQuota(primaryUsage.usage.quotaSnapshots.completions)}`,
-          `Quota reset: ${formatTimestamp(primaryUsage.usage.quotaResetAt)}`,
-        ];
+  const quotaSummaryLines = [
+    `Premium requests (global): ${globalPremiumQuota}`,
+  ];
 
   const billingSummaryLines =
     primaryBillingUsage?.report === null || primaryBillingUsage?.report === undefined
       ? [
           `Premium request report: unavailable${primaryBillingUsage?.error ? ` (${primaryBillingUsage.error})` : ""}`,
-        ]
+]
       : [
-          `Premium request report user: ${primaryBillingUsage.report.user || "-"}`,
           `Premium request report: ${describePremiumRequestReport(primaryBillingUsage.report)}`,
-          `Premium request models: ${describePremiumRequestModels(primaryBillingUsage.report)}`,
-        ];
+]
 
   const summaryLines = [
     `${APP_NAME} v${APP_VERSION}`,
     `Authenticated: yes`,
     `Accounts: ${accounts.length} total, ${enabledAccounts.length} enabled, ${healthyAccounts.length} healthy, ${coolingDownAccounts.length} cooling down, ${reauthAccounts.length} reauth required`,
     `Rotation strategy: ${runtimeSettings.rotationStrategy}`,
-    `Default account: ${defaultAccount?.label ?? "-"}`,
     `Token status: ${longestValidTokenLifetime > 0 ? `valid (${formatDuration(longestValidTokenLifetime)} remaining)` : "no valid Copilot token cached"}`,
     `Model catalog: ${modelRefresh.mergedModelCount ?? cachedModelCount} ${modelRefresh.mergedModelCount === null ? "cached" : "live"}`,
     `Catalog refresh: ${modelRefresh.error === null ? "ok" : `failed (${modelRefresh.error})`}`,
     ...quotaSummaryLines,
     ...billingSummaryLines,
     "Global token usage: unavailable — GitHub's Copilot and billing APIs expose request/quota data, not prompt/completion token totals.",
-    `Local proxy usage: ${primaryAccount === null ? "unavailable" : describeObservedUsage(primaryAccount)}`,
+    `Local proxy usage: ${describeAggregateObservedUsage(accounts)}`,
     "",
     ...tableLines,
   ];

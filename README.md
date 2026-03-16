@@ -40,19 +40,31 @@ In another terminal:
 mise run auth-login
 ```
 
-### 4. Configure Claude Code (optional)
+### 4. Configure coding agents (optional but recommended)
+
+> Example remote setup uses a placeholder URL. Replace it with your own deployed CopilotX domain.
+
+> If you want to use a hosted proxy from coding agents, pass the deployed URL and your normal proxy API key.
+
+> The CLI can now configure Claude Code, Codex CLI, Factory Droid, and Oh My Pi in one step.
 
 ```bash
-mise run config-claude-code
+copilotx config all \
+  --base-url https://your-domain.example \
+  --api-key YOUR_PROXY_API_KEY
 ```
 
-That command reads `~/.copilotx/server.json`, so it still points Claude Code at the right local URL when `24680` was busy and the proxy moved.
+That command configures:
+- Claude Code via `~/.claude/settings.json`
+- Codex CLI via `~/.codex/config.toml` plus `~/.copilotx/bin/codex-copilotx`
+- Factory Droid via `~/.factory/settings.local.json` plus `~/.copilotx/bin/droid-copilotx`
+- Oh My Pi via `~/.copilotx/bin/omp-copilotx`
 
-For a remote CopilotX deployment, use the raw CLI command instead:
+> Add launchers to your shell once:
 
-```bash
-copilotx config claude-code --base-url https://your-domain.example --api-key YOUR_API_KEY
-```
+> `export PATH="$HOME/.copilotx/bin:$PATH"`
+
+> Individual targets are also supported: `claude-code`, `codex-cli`, `factory-droid`, `oh-my-pi`.
 
 ### 5. Use it
 
@@ -75,13 +87,17 @@ http://127.0.0.1:24680
 ## The only commands most people need
 
 ```bash
-mise run start              # start Postgres + proxy
-mise run stop               # stop Postgres
-mise run auth-login         # device-flow login
-mise run auth-logout        # remove persisted accounts
-mise run config-claude-code # write Claude Code settings
-mise run status             # auth/quota/account status
-mise run models             # list all models, including hidden ones
+mise run start                    # start Postgres + proxy
+mise run stop                     # stop Postgres
+mise run auth-login               # device-flow login
+mise run auth-logout              # remove persisted accounts
+mise run status                   # auth/quota/account status
+mise run models                   # list all models, including hidden ones
+copilotx config claude-code       # wire Claude Code to local or remote CopilotX
+copilotx config codex-cli         # wire OpenAI Codex CLI to CopilotX
+copilotx config factory-droid     # wire Factory Droid to CopilotX
+copilotx config oh-my-pi          # create Oh My Pi launcher against CopilotX
+copilotx config all               # configure all supported agent CLIs at once
 ```
 
 ## Useful URLs
@@ -113,6 +129,58 @@ curl -X POST http://127.0.0.1:24680/auth/device/poll \
   -d '{"device_code":"..."}'
 ```
 
+### Import an existing GitHub token (admin-only)
+
+```bash
+curl -X POST https://your-domain.example/auth/import-github-token \
+  -H 'Authorization: Bearer YOUR_IMPORT_API_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"github_token":"ghu_..."}'
+```
+
+## Using the deployed proxy from coding agents
+
+### Claude Code
+
+After `copilotx config claude-code --base-url ... --api-key ...`:
+- launch `claude` normally
+- requests go to CopilotX through the configured Anthropic-compatible endpoint
+- model defaults come from the generated Claude env block
+
+### Codex CLI
+
+After `copilotx config codex-cli --base-url ... --api-key ...`:
+- run `codex-copilotx`
+- the launcher uses the generated `copilotx` profile in `~/.codex/config.toml`
+- Codex talks to CopilotX through the OpenAI Responses API
+
+### Factory Droid
+
+After `copilotx config factory-droid --base-url ... --api-key ...`:
+- run `droid-copilotx` for interactive mode
+- run `droid-copilotx exec \"your prompt\"` for automation
+- the launcher selects the generated `custom-model` entry in `~/.factory/settings.local.json`
+
+### Oh My Pi
+
+After `copilotx config oh-my-pi --base-url ... --api-key ...`:
+- run `omp-copilotx`
+- the launcher exports `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and Oh My Pi role model env vars before launching `omp`
+
+### Verify the deployment first
+
+```bash
+curl https://your-domain.example/readyz
+curl -H 'Authorization: Bearer YOUR_PROXY_API_KEY' \
+  https://your-domain.example/v1/models
+```
+
+Expected readiness after account import:
+- `authenticated: true`
+- `accounts_healthy: 15`
+- `copilot_ready: true`
+
+
 ## Notes that matter
 
 - Minimum supported database: PostgreSQL 18+
@@ -137,7 +205,8 @@ Required env:
 ```bash
 DATABASE_URL=postgresql://...
 COPILOTX_TOKEN_ENCRYPTION_KEY=<64-hex-or-base64>
-COPILOTX_API_KEY=<random-secret>
+COPILOTX_API_KEY=<normal-client-secret>
+COPILOTX_IMPORT_API_KEY=<admin-only-import-secret>
 COPILOTX_HOST=0.0.0.0
 COPILOTX_PORT=$PORT
 ```
@@ -151,7 +220,8 @@ The same required env vars apply:
 ```bash
 DATABASE_URL=postgresql://...
 COPILOTX_TOKEN_ENCRYPTION_KEY=<64-hex-or-base64>
-COPILOTX_API_KEY=<random-secret>
+COPILOTX_API_KEY=<normal-client-secret>
+COPILOTX_IMPORT_API_KEY=<admin-only-import-secret>
 COPILOTX_HOST=0.0.0.0
 COPILOTX_PORT=24680
 ```
@@ -159,5 +229,5 @@ COPILOTX_PORT=24680
 ## Truthful limits
 
 - No first-class production Dockerfile yet
-- HTTP auth API currently covers device-flow bootstrap only
+- HTTP auth API covers device-flow bootstrap and admin token import; keep `COPILOTX_IMPORT_API_KEY` admin-only
 - GitHub still does not expose truthful global prompt/completion token totals for end-user Copilot accounts

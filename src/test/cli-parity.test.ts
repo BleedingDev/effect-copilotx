@@ -9,11 +9,18 @@ import * as Effect from "effect/Effect";
 import {
   mergeClaudeCodeSettings,
   readProjectApiKey,
-  resolveClaudeBaseUrl,
+  resolveAgentBaseUrl,
   selectPreferredModel,
   writeClaudeCodeSettings,
-} from "#/services/claude-code-config";
-import { getClaudeCodeSettingsPath } from "#/services/local-paths";
+  writeCodexCliSetup,
+  writeFactoryDroidSetup,
+  writeOhMyPiSetup,
+} from "#/services/agent-config";
+import {
+  getClaudeCodeSettingsPath,
+  getCodexConfigPath,
+  getFactorySettingsLocalPath,
+} from "#/services/local-paths";
 import { resolveListenOptions } from "#/services/port-selection";
 import {
   cleanupServerInfo,
@@ -36,7 +43,7 @@ describe("CLI parity helpers", () => {
       ).toBe("claude-opus-4.6");
       expect(selectPreferredModel([], ["haiku"], "gpt-5-mini")).toBe("gpt-5-mini");
       expect(
-        resolveClaudeBaseUrl(undefined, {
+        resolveAgentBaseUrl(undefined, {
           base_url: "http://127.0.0.1:4312",
           host: "127.0.0.1",
           pid: 1,
@@ -46,6 +53,8 @@ describe("CLI parity helpers", () => {
         })
       ).toBe("https://copilotx.localhost");
     }));
+
+
 
   it.effect("writes Claude Code settings while preserving existing keys", () =>
     Effect.tryPromise({
@@ -107,6 +116,122 @@ describe("CLI parity helpers", () => {
       },
       catch: toError,
     }));
+
+  it.effect("writes Codex CLI config and launcher", () =>
+    Effect.tryPromise({
+      try: async () => {
+        const homeDir = await mkdtemp(join(tmpdir(), "copilotx-codex-"));
+        try {
+          const configPath = getCodexConfigPath(homeDir);
+          await mkdir(dirname(configPath), { recursive: true });
+          await writeFile(
+            configPath,
+            '# existing\n[profiles.default]\nmodel = "gpt-5.4"\n',
+            "utf8"
+          );
+
+          const result = await writeCodexCliSetup(
+            {
+              apiKey: "test-key",
+              baseUrl: "https://copilotx.example.com",
+              model: "gpt-5.4",
+              smallModel: "gpt-5-mini",
+            },
+            homeDir
+          );
+
+          const configContent = await readFile(configPath, "utf8");
+          expect(result.configPath).toBe(configPath);
+          expect(result.launcherPath).toContain("codex-copilotx");
+          expect(configContent).toContain("[model_providers.copilotx]");
+          expect(configContent).toContain('experimental_bearer_token = "test-key"');
+          expect(configContent).toContain('[profiles.copilotx]');
+          expect(configContent).toContain('model = "gpt-5.4"');
+        } finally {
+          await rm(homeDir, { force: true, recursive: true });
+        }
+      },
+      catch: toError,
+    }));
+
+  it.effect("writes Factory Droid settings and launcher", () =>
+    Effect.tryPromise({
+      try: async () => {
+        const homeDir = await mkdtemp(join(tmpdir(), "copilotx-factory-"));
+        try {
+          const settingsPath = getFactorySettingsLocalPath(homeDir);
+          await mkdir(dirname(settingsPath), { recursive: true });
+          await writeFile(
+            settingsPath,
+            JSON.stringify({ customModels: [{ displayName: "Other" }], ui: "dark" }, null, 2),
+            "utf8"
+          );
+
+          const result = await writeFactoryDroidSetup(
+            {
+              apiKey: "factory-key",
+              baseUrl: "https://copilotx.example.com",
+              model: "claude-opus-4.6",
+              smallModel: "gpt-5-mini",
+            },
+            homeDir
+          );
+
+          const parsed = JSON.parse(await readFile(settingsPath, "utf8")) as {
+            customModels: Array<Record<string, unknown>>;
+            ui: string;
+          };
+          const copilotxModel = parsed.customModels.find(
+            (model) => model.displayName === "CopilotX Remote"
+          );
+
+          expect(result.configPath).toBe(settingsPath);
+          expect(result.launcherPath).toContain("droid-copilotx");
+          expect(parsed.ui).toBe("dark");
+          expect(copilotxModel).toMatchObject({
+            apiKey: "factory-key",
+            baseUrl: "https://copilotx.example.com",
+            model: "claude-opus-4.6",
+            provider: "anthropic",
+          });
+        } finally {
+          await rm(homeDir, { force: true, recursive: true });
+        }
+      },
+      catch: toError,
+    }));
+
+  it.effect("writes Oh My Pi launcher with CopilotX env", () =>
+    Effect.tryPromise({
+      try: async () => {
+        const homeDir = await mkdtemp(join(tmpdir(), "copilotx-omp-"));
+        try {
+          const result = await writeOhMyPiSetup(
+            {
+              apiKey: "omp-key",
+              baseUrl: "https://copilotx.example.com",
+              model: "gpt-5.4",
+              smallModel: "gpt-5-mini",
+            },
+            homeDir
+          );
+
+          if (result.launcherPath === null) {
+            throw new Error("Expected Oh My Pi launcher path.");
+          }
+
+          const launcher = await readFile(result.launcherPath, "utf8");
+          expect(launcher).toContain('export OPENAI_BASE_URL="https://copilotx.example.com/v1"');
+          expect(launcher).toContain('export OPENAI_API_KEY="omp-key"');
+          expect(launcher).toContain('export PI_SMOL_MODEL="gpt-5-mini"');
+          expect(launcher).toContain('exec omp --model "gpt-5.4" "$@"');
+        } finally {
+          await rm(homeDir, { force: true, recursive: true });
+        }
+      },
+      catch: toError,
+    }));
+
 
   it.effect("writes and cleans server discovery metadata safely", () =>
     Effect.tryPromise({
