@@ -7,6 +7,7 @@ import {
   getClaudeCodeSettingsPath,
   getCodexConfigPath,
   getCopilotXBinDir,
+  getCopilotXOhMyPiAgentDir,
   getFactorySettingsLocalPath,
 } from "#/services/local-paths";
 import type { CopilotXServerInfoFile } from "#/services/server-discovery";
@@ -38,12 +39,16 @@ const codexProfileName = "copilotx";
 const copilotxBlockBegin = "BEGIN COPILOTX MANAGED BLOCK";
 const copilotxBlockEnd = "END COPILOTX MANAGED BLOCK";
 const factoryDisplayName = "CopilotX Remote";
+const ompProviderName = "copilotx";
+const ompApiKeyEnvName = "COPILOTX_OMP_API_KEY";
+
 
 export interface AgentSetupInput {
   readonly apiKey: string;
   readonly baseUrl: string;
   readonly model: string;
   readonly smallModel: string;
+  readonly modelCatalog?: readonly string[];
 }
 
 export interface AgentSetupResult {
@@ -126,16 +131,42 @@ const openAiBaseUrl = (baseUrl: string): string => new URL("/v1", baseUrl).toStr
 
 const isAnthropicModel = (model: string): boolean => model.toLowerCase().startsWith("claude-");
 
-const factoryProviderForModel = (model: string) =>
-  isAnthropicModel(model) ? "anthropic" : "openai";
+const factoryDroidProviderForModel = (model: string) =>
+  isAnthropicModel(model) ? "generic-chat-completion-api" : "openai";
 
-const factoryBaseUrlForModel = (baseUrl: string, model: string): string =>
-  factoryProviderForModel(model) === "anthropic" ? baseUrl : openAiBaseUrl(baseUrl);
+const factoryBaseUrlForModel = (baseUrl: string): string => openAiBaseUrl(baseUrl);
 
 const factoryMaxOutputTokens = (model: string): number =>
-  factoryProviderForModel(model) === "anthropic" ? 8192 : 16384;
+  isAnthropicModel(model) ? 8192 : 16384;
+
+const toFactoryCustomModelId = (model: string, index: number): string => {
+  const sanitizedModel = model
+    .replace(/[^A-Za-z0-9.-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  return `custom:CopilotX-${sanitizedModel.length > 0 ? sanitizedModel : "Model"}-${index}`;
+};
 
 const tomlString = (value: string): string => JSON.stringify(value);
+const ompScopedModel = (modelId: string): string => `${ompProviderName}/${modelId}`;
+
+const resolveOhMyPiModelCatalog = (input: AgentSetupInput): readonly string[] => {
+  const catalog = normalizeIds([...(input.modelCatalog ?? []), input.model, input.smallModel]);
+  return catalog.length > 0 ? catalog : [input.model, input.smallModel];
+};
+
+const buildOhMyPiModelsConfig = (baseUrl: string, modelCatalog: readonly string[]): string =>
+  [
+    "providers:",
+    `  ${ompProviderName}:`,
+    `    baseUrl: ${tomlString(openAiBaseUrl(baseUrl))}`,
+    `    apiKey: ${tomlString(ompApiKeyEnvName)}`,
+    '    api: "openai-responses"',
+    "    models:",
+    ...modelCatalog.map((modelId) => `      - id: ${tomlString(modelId)}`),
+    "",
+  ].join("\n");
+
 
 export const selectPreferredModel = (
   modelIds: readonly string[],
@@ -268,10 +299,47 @@ export const writeCodexCliSetup = async (
   const launcherPath = await writeExecutableScript(
     "codex-copilotx",
     {
-      cmd: `@echo off\r\nsetlocal\r\ncodex --profile ${codexProfileName} %*\r\n`,
-      posix: `#!/bin/sh\nexec codex --profile ${codexProfileName} "$@"\n`,
-      powerShell:
-        `#!/usr/bin/env pwsh\n$ErrorActionPreference = "Stop"\n& codex --profile ${codexProfileName} @args\nexit $LASTEXITCODE\n`,
+      cmd: [
+        "@echo off",
+        "setlocal",
+        "if /I \"%~1\"==\"exec\" (",
+        "  shift",
+        `  codex exec --profile ${codexProfileName} %*`,
+        "  exit /b %ERRORLEVEL%",
+        ")",
+        "if /I \"%~1\"==\"review\" (",
+        "  shift",
+        `  codex review --profile ${codexProfileName} %*`,
+        "  exit /b %ERRORLEVEL%",
+        ")",
+        `codex --profile ${codexProfileName} %*`,
+        "",
+      ].join("\r\n"),
+      posix: [
+        "#!/bin/sh",
+        'if [ "$1" = "exec" ] || [ "$1" = "review" ]; then',
+        "  command=$1",
+        "  shift",
+        `  exec codex "$command" --profile ${codexProfileName} "$@"`,
+        "fi",
+        `exec codex --profile ${codexProfileName} "$@"`,
+        "",
+      ].join("\n"),
+      powerShell: [
+        "#!/usr/bin/env pwsh",
+        '$ErrorActionPreference = "Stop"',
+        "if ($args.Count -gt 0) {",
+        '  $first = $args[0].ToLowerInvariant()',
+        '  if ($first -eq "exec" -or $first -eq "review") {',
+        "    $remaining = if ($args.Count -gt 1) { $args[1..($args.Count - 1)] } else { @() }",
+        `    & codex $first --profile ${codexProfileName} @remaining`,
+        "    exit $LASTEXITCODE",
+        "  }",
+        "}",
+        `& codex --profile ${codexProfileName} @args`,
+        "exit $LASTEXITCODE",
+        "",
+      ].join("\n"),
     },
     homeDir
   );
@@ -311,17 +379,33 @@ export const writeFactoryDroidSetup = async (
       )
     : [];
 
+  const nextCustomModelIndex =
+    existingModels.reduce((maxIndex, entry) => {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+        return maxIndex;
+      }
+      const maybeIndex = (entry as { readonly index?: unknown }).index;
+      return typeof maybeIndex === "number" && Number.isFinite(maybeIndex)
+        ? Math.max(maxIndex, Math.trunc(maybeIndex))
+        : maxIndex;
+    }, -1) + 1;
+
+  const customModelId = toFactoryCustomModelId(input.model, nextCustomModelIndex);
+
   const nextSettings = {
     ...settings,
     customModels: [
       ...existingModels,
       {
         apiKey: input.apiKey,
-        baseUrl: factoryBaseUrlForModel(input.baseUrl, input.model),
+        baseUrl: factoryBaseUrlForModel(input.baseUrl),
         displayName: factoryDisplayName,
+        id: customModelId,
+        index: nextCustomModelIndex,
         maxOutputTokens: factoryMaxOutputTokens(input.model),
         model: input.model,
-        provider: factoryProviderForModel(input.model),
+        noImageSupport: false,
+        provider: factoryDroidProviderForModel(input.model),
       },
     ],
   };
@@ -337,10 +421,10 @@ export const writeFactoryDroidSetup = async (
         "setlocal",
         "if /I \"%~1\"==\"exec\" (",
         "  shift",
-        "  droid exec -m custom-model %*",
+        `  droid exec -m ${tomlString(customModelId)} %*`,
         "  exit /b %ERRORLEVEL%",
         ")",
-        "droid -m custom-model %*",
+        `droid -m ${tomlString(customModelId)} %*`,
         "exit /b %ERRORLEVEL%",
         "",
       ].join("\r\n"),
@@ -348,9 +432,9 @@ export const writeFactoryDroidSetup = async (
         "#!/bin/sh",
         'if [ "$1" = "exec" ]; then',
         "  shift",
-        '  exec droid exec -m custom-model "$@"',
+        `  exec droid exec -m ${tomlString(customModelId)} "$@"`,
         "fi",
-        'exec droid -m custom-model "$@"',
+        `exec droid -m ${tomlString(customModelId)} "$@"`,
         "",
       ].join("\n"),
       powerShell: [
@@ -358,10 +442,10 @@ export const writeFactoryDroidSetup = async (
         '$ErrorActionPreference = "Stop"',
         'if ($args.Count -gt 0 -and $args[0].ToLowerInvariant() -eq "exec") {',
         "  $remaining = if ($args.Count -gt 1) { $args[1..($args.Count - 1)] } else { @() }",
-        "  & droid exec -m custom-model @remaining",
+        `  & droid exec -m ${tomlString(customModelId)} @remaining`,
         "  exit $LASTEXITCODE",
         "}",
-        "& droid -m custom-model @args",
+        `& droid -m ${tomlString(customModelId)} @args`,
         "exit $LASTEXITCODE",
         "",
       ].join("\n"),
@@ -380,40 +464,55 @@ export const writeOhMyPiSetup = async (
   input: AgentSetupInput,
   homeDir?: string
 ): Promise<AgentSetupResult> => {
+  const configPath = join(getCopilotXOhMyPiAgentDir(homeDir), "models.yml");
+  const modelCatalog = resolveOhMyPiModelCatalog(input);
+  const scopedModel = ompScopedModel(input.model);
+  const scopedSmallModel = ompScopedModel(input.smallModel);
+
+  await ensureParentDir(configPath);
+  await writeFile(configPath, buildOhMyPiModelsConfig(input.baseUrl, modelCatalog), "utf8");
+
   const launcherPath = await writeExecutableScript(
     "omp-copilotx",
     {
       cmd: [
         "@echo off",
         "setlocal",
-        `set "OPENAI_BASE_URL=${openAiBaseUrl(input.baseUrl)}"`,
-        `set "OPENAI_API_KEY=${input.apiKey}"`,
-        `set "PI_SMOL_MODEL=${input.smallModel}"`,
-        `set "PI_SLOW_MODEL=${input.model}"`,
-        `set "PI_PLAN_MODEL=${input.model}"`,
-        `omp --model ${input.model} %*`,
+        "set \"OPENAI_API_KEY=\"",
+        "set \"OPENROUTER_API_KEY=\"",
+        "set \"GITHUB_TOKEN=\"",
+        "set \"ANTHROPIC_API_KEY=\"",
+        "set \"GEMINI_API_KEY=\"",
+        `set "PI_CODING_AGENT_DIR=${getCopilotXOhMyPiAgentDir(homeDir)}"`,
+        `set "${ompApiKeyEnvName}=${input.apiKey}"`,
+        `set "PI_SMOL_MODEL=${scopedSmallModel}"`,
+        `set "PI_SLOW_MODEL=${scopedModel}"`,
+        `set "PI_PLAN_MODEL=${scopedModel}"`,
+        `omp --model ${scopedModel} --models ${ompProviderName}/* %*`,
         "exit /b %ERRORLEVEL%",
         "",
       ].join("\r\n"),
       posix: [
         "#!/bin/sh",
-        `export OPENAI_BASE_URL=${tomlString(openAiBaseUrl(input.baseUrl))}`,
-        `export OPENAI_API_KEY=${tomlString(input.apiKey)}`,
-        `export PI_SMOL_MODEL=${tomlString(input.smallModel)}`,
-        `export PI_SLOW_MODEL=${tomlString(input.model)}`,
-        `export PI_PLAN_MODEL=${tomlString(input.model)}`,
-        `exec omp --model ${tomlString(input.model)} "$@"`,
+        "unset OPENAI_API_KEY OPENROUTER_API_KEY GITHUB_TOKEN ANTHROPIC_API_KEY GEMINI_API_KEY",
+        `export PI_CODING_AGENT_DIR=${tomlString(getCopilotXOhMyPiAgentDir(homeDir))}`,
+        `export ${ompApiKeyEnvName}=${tomlString(input.apiKey)}`,
+        `export PI_SMOL_MODEL=${tomlString(scopedSmallModel)}`,
+        `export PI_SLOW_MODEL=${tomlString(scopedModel)}`,
+        `export PI_PLAN_MODEL=${tomlString(scopedModel)}`,
+        `exec omp --model ${tomlString(scopedModel)} --models ${tomlString(`${ompProviderName}/*`)} "$@"`,
         "",
       ].join("\n"),
       powerShell: [
         "#!/usr/bin/env pwsh",
         '$ErrorActionPreference = "Stop"',
-        `$env:OPENAI_BASE_URL = ${tomlString(openAiBaseUrl(input.baseUrl))}`,
-        `$env:OPENAI_API_KEY = ${tomlString(input.apiKey)}`,
-        `$env:PI_SMOL_MODEL = ${tomlString(input.smallModel)}`,
-        `$env:PI_SLOW_MODEL = ${tomlString(input.model)}`,
-        `$env:PI_PLAN_MODEL = ${tomlString(input.model)}`,
-        `& omp --model ${tomlString(input.model)} @args`,
+        'foreach ($name in @("OPENAI_API_KEY", "OPENROUTER_API_KEY", "GITHUB_TOKEN", "ANTHROPIC_API_KEY", "GEMINI_API_KEY")) { Remove-Item "Env:$name" -ErrorAction SilentlyContinue }',
+        `$env:PI_CODING_AGENT_DIR = ${tomlString(getCopilotXOhMyPiAgentDir(homeDir))}`,
+        `$env:${ompApiKeyEnvName} = ${tomlString(input.apiKey)}`,
+        `$env:PI_SMOL_MODEL = ${tomlString(scopedSmallModel)}`,
+        `$env:PI_SLOW_MODEL = ${tomlString(scopedModel)}`,
+        `$env:PI_PLAN_MODEL = ${tomlString(scopedModel)}`,
+        `& omp --model ${tomlString(scopedModel)} --models ${tomlString(`${ompProviderName}/*`)} @args`,
         "exit $LASTEXITCODE",
         "",
       ].join("\n"),
@@ -422,7 +521,7 @@ export const writeOhMyPiSetup = async (
   );
 
   return {
-    configPath: null,
+    configPath,
     launcherPath,
     target: "oh-my-pi",
   };

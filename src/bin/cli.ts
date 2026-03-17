@@ -412,15 +412,38 @@ const fetchRemoteModelIds = async (
     headers.set("Authorization", `Bearer ${apiKey}`);
   }
 
-  const response = await fetch(new URL("/v1/models", baseUrl), {
-    headers,
-    signal: AbortSignal.timeout(5_000),
-  });
-  if (!response.ok) {
-    throw new Error(`Model discovery failed with status ${response.status}.`);
+  const modelsUrl = new URL("/v1/models", baseUrl);
+  const maxAttempts = 3;
+
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const response = await fetch(modelsUrl, {
+        headers,
+        signal: AbortSignal.timeout(12_000),
+      });
+      if (response.ok) {
+        return extractModelIdsFromOpenAiList(await response.json());
+      }
+
+      const statusMessage = `Model discovery failed with status ${response.status}.`;
+      // Retry transient upstream/load-shed responses once or twice before degrading to defaults.
+      if (attempt < maxAttempts && (response.status === 429 || response.status >= 500)) {
+        lastError = new Error(statusMessage);
+        continue;
+      }
+      throw new Error(statusMessage);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= maxAttempts) {
+        throw error;
+      }
+    }
   }
 
-  return extractModelIdsFromOpenAiList(await response.json());
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Model discovery failed.");
 };
 
 const resolveConfigTargets = (target: string) => {
@@ -587,6 +610,7 @@ const runConfigCommand = (options: ConfigOptions) =>
               baseUrl,
               model: ompModel,
               smallModel: ompSmallModel,
+              modelCatalog: modelIds,
             }),
           catch: (error) => new Error(describeUnknownError(error), { cause: error }),
         })

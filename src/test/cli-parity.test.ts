@@ -154,9 +154,9 @@ describe("CLI parity helpers", () => {
           expect(configContent).toContain('experimental_bearer_token = "test-key"');
           expect(configContent).toContain('[profiles.copilotx]');
           expect(configContent).toContain('model = "gpt-5.4"');
-          expect(launcher).toContain('exec codex --profile copilotx "$@"');
-          expect(launcherCmd).toContain("codex --profile copilotx %*");
-          expect(launcherPs1).toContain("& codex --profile copilotx @args");
+          expect(launcher).toContain('exec codex "$command" --profile copilotx "$@"');
+          expect(launcherCmd).toContain("codex exec --profile copilotx %*");
+          expect(launcherPs1).toContain("& codex $first --profile copilotx @remaining");
         } finally {
           await rm(homeDir, { force: true, recursive: true });
         }
@@ -207,15 +207,16 @@ describe("CLI parity helpers", () => {
           expect(parsed.ui).toBe("dark");
           expect(copilotxModel).toMatchObject({
             apiKey: "factory-key",
-            baseUrl: "https://copilotx.example.com",
+            baseUrl: "https://copilotx.example.com/v1",
+            id: "custom:CopilotX-claude-opus-4.6-0",
             model: "claude-opus-4.6",
-            provider: "anthropic",
+            provider: "generic-chat-completion-api",
           });
-          expect(launcher).toContain('exec droid -m custom-model "$@"');
+          expect(launcher).toContain('exec droid -m "custom:CopilotX-claude-opus-4.6-0" "$@"');
           expect(launcherCmd).toContain('if /I "%~1"=="exec" (');
-          expect(launcherCmd).toContain("droid exec -m custom-model %*");
-          expect(launcherPs1).toContain("& droid exec -m custom-model @remaining");
-          expect(launcherPs1).toContain("& droid -m custom-model @args");
+          expect(launcherCmd).toContain('droid exec -m "custom:CopilotX-claude-opus-4.6-0" %*');
+          expect(launcherPs1).toContain('& droid exec -m "custom:CopilotX-claude-opus-4.6-0" @remaining');
+          expect(launcherPs1).toContain('& droid -m "custom:CopilotX-claude-opus-4.6-0" @args');
         } finally {
           await rm(homeDir, { force: true, recursive: true });
         }
@@ -234,25 +235,35 @@ describe("CLI parity helpers", () => {
               baseUrl: "https://copilotx.example.com",
               model: "gpt-5.4",
               smallModel: "gpt-5-mini",
+              modelCatalog: ["gpt-5.4", "gpt-5-mini", "gpt-4.1"],
             },
             homeDir
           );
 
-          if (result.launcherPath === null) {
-            throw new Error("Expected Oh My Pi launcher path.");
+          if (result.launcherPath === null || result.configPath === null) {
+            throw new Error("Expected Oh My Pi launcher and config paths.");
           }
 
           const launcher = await readFile(result.launcherPath, "utf8");
           const launcherCmd = await readFile(`${result.launcherPath}.cmd`, "utf8");
           const launcherPs1 = await readFile(`${result.launcherPath}.ps1`, "utf8");
-          expect(launcher).toContain('export OPENAI_BASE_URL="https://copilotx.example.com/v1"');
-          expect(launcher).toContain('export OPENAI_API_KEY="omp-key"');
-          expect(launcher).toContain('export PI_SMOL_MODEL="gpt-5-mini"');
-          expect(launcher).toContain('exec omp --model "gpt-5.4" "$@"');
-          expect(launcherCmd).toContain('set "OPENAI_BASE_URL=https://copilotx.example.com/v1"');
-          expect(launcherCmd).toContain("omp --model gpt-5.4 %*");
-          expect(launcherPs1).toContain('$env:OPENAI_API_KEY = "omp-key"');
-          expect(launcherPs1).toContain('& omp --model "gpt-5.4" @args');
+          const modelsConfig = await readFile(result.configPath, "utf8");
+          expect(result.configPath).toContain("omp-agent");
+          expect(result.configPath).toContain("models.yml");
+          expect(modelsConfig).toContain("providers:");
+          expect(modelsConfig).toContain("  copilotx:");
+          expect(modelsConfig).toContain('    baseUrl: "https://copilotx.example.com/v1"');
+          expect(modelsConfig).toContain('    apiKey: "COPILOTX_OMP_API_KEY"');
+          expect(modelsConfig).toContain('      - id: "gpt-4.1"');
+          expect(launcher).toContain('export PI_CODING_AGENT_DIR=');
+          expect(launcher).toContain('export COPILOTX_OMP_API_KEY="omp-key"');
+          expect(launcher).toContain('export PI_SMOL_MODEL="copilotx/gpt-5-mini"');
+          expect(launcher).toContain('exec omp --model "copilotx/gpt-5.4" --models "copilotx/*" "$@"');
+          expect(launcherCmd).toContain('set "COPILOTX_OMP_API_KEY=omp-key"');
+          expect(launcherCmd).toContain('set "PI_SMOL_MODEL=copilotx/gpt-5-mini"');
+          expect(launcherCmd).toContain("omp --model copilotx/gpt-5.4 --models copilotx/* %*");
+          expect(launcherPs1).toContain('$env:COPILOTX_OMP_API_KEY = "omp-key"');
+          expect(launcherPs1).toContain('& omp --model "copilotx/gpt-5.4" --models "copilotx/*" @args');
         } finally {
           await rm(homeDir, { force: true, recursive: true });
         }

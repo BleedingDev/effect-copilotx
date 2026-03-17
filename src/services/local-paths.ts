@@ -27,3 +27,6 @@ export const getOhMyPiAgentDir = (homeDir = effectiveHomeDir()) =>
   process.env.PI_CODING_AGENT_DIR?.trim() ||
   join(homeDir, effectivePiConfigDirName(), "agent");
 
+export const getCopilotXOhMyPiAgentDir = (homeDir = effectiveHomeDir()) =>
+  join(getCopilotXHomeDir(homeDir), "omp-agent");
+

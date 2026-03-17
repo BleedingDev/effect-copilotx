@@ -68,6 +68,7 @@ That command configures:
   - POSIX: `~/.copilotx/bin/omp-copilotx`
   - Windows cmd: `~/.copilotx/bin/omp-copilotx.cmd`
   - PowerShell: `~/.copilotx/bin/omp-copilotx.ps1`
+- Oh My Pi managed model config: `~/.copilotx/omp-agent/models.yml`
 
 - GitHub Copilot CLI is recognized by `copilotx config github-copilot-cli`, but GitHub CLI does not expose custom Copilot backend/base URL/API key overrides, so it cannot be pointed at CopilotX today.
 
@@ -180,14 +181,14 @@ After `copilotx config codex-cli --base-url ... --api-key ...`:
 After `copilotx config factory-droid --base-url ... --api-key ...`:
 - run `droid-copilotx` for interactive mode
 - run `droid-copilotx exec \"your prompt\"` for automation
-- the launcher selects the generated `custom-model` entry in `~/.factory/settings.local.json`
+- the launcher selects the generated `"CopilotX Remote"` custom model from `~/.factory/settings.local.json`
 
 ### Oh My Pi
 
 After `copilotx config oh-my-pi --base-url ... --api-key ...`:
 - run `omp-copilotx`
-- the launcher exports `OPENAI_BASE_URL`, `OPENAI_API_KEY`, and Oh My Pi role model env vars before launching `omp`
-
+- the launcher isolates Oh My Pi state under `~/.copilotx/omp-agent` via `PI_CODING_AGENT_DIR`
+- CopilotX writes `~/.copilotx/omp-agent/models.yml` with a dedicated `copilotx` provider, exports `COPILOTX_OMP_API_KEY` + role model env vars, and launches `omp` with `--models copilotx/*`
 ### GitHub Copilot CLI
 
 GitHub Copilot CLI is not currently configurable as a CopilotX client.
