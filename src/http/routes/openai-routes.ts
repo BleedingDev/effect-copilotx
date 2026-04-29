@@ -53,6 +53,12 @@ const asModel = (body: Record<string, unknown>): string | null => {
   return trimmed.length > 0 ? trimmed : null;
 };
 
+const withDefaultModel = (
+  body: Record<string, unknown>,
+  defaultModel: string
+): Record<string, unknown> =>
+  asModel(body) === null ? { ...body, model: defaultModel } : body;
+
 const createClient = (config: AppConfigShape, account: AccountRecord) =>
   new CopilotClient(account.copilotToken, {
     apiBaseUrl: account.apiBaseUrl,
@@ -67,7 +73,7 @@ const prepareFailFastStream = <A>(stream: Stream.Stream<A, unknown>) =>
     const iterator = iterable[Symbol.asyncIterator]();
     const first = yield* Effect.tryPromise({
       try: async () => iterator.next(),
-      catch: (error) => new Error(describeError(error), { cause: error }),
+      catch: (error) => error,
     });
 
     if (first.done) {
@@ -92,7 +98,7 @@ const prepareFailFastStream = <A>(stream: Stream.Stream<A, unknown>) =>
     return Stream.fromAsyncIterable(wrapped, (error) => error);
   });
 
-const toUnknownError = (error: unknown) => new Error(describeError(error), { cause: error });
+const toUnknownError = (error: unknown) => error;
 
 const persistUsageEffect = (
   repository: {
@@ -130,7 +136,10 @@ const chatCompletionsRoute = HttpRouter.add(
         return unauthorized;
       }
 
-      const body = yield* readJsonRecord(request);
+      const body = withDefaultModel(
+        yield* readJsonRecord(request),
+        config.runtime.defaultModel
+      );
       const repository = yield* AccountRepository;
       const runtime = yield* ProxyRuntimeService;
       const model = asModel(body);
@@ -234,7 +243,10 @@ const responsesRoute = HttpRouter.add("POST", "/v1/responses", (request) =>
       return unauthorized;
     }
 
-    const body = yield* readJsonRecord(request);
+    const body = withDefaultModel(
+      yield* readJsonRecord(request),
+      config.runtime.defaultModel
+    );
     const repository = yield* AccountRepository;
     const runtime = yield* ProxyRuntimeService;
     const model = asModel(body);

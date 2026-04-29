@@ -14,6 +14,7 @@ const testConfig: AppConfigShape = {
     url: Redacted.make("postgresql://example"),
   },
   runtime: {
+    defaultModel: "gpt-5.3-codex",
     host: "127.0.0.1",
     idleTimeoutSeconds: 0,
     logLevel: "info",

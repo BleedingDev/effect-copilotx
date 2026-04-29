@@ -1,4 +1,6 @@
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 
@@ -25,6 +27,7 @@ import type {
   ProxyRuntimeStreamRequest,
   RuntimeModelDescriptor,
 } from "#/domain/models/runtime-types";
+import { extractUpstreamErrorPayload } from "#/http/upstream-compat";
 import {
   ModelRoutingRegistry,
   alternateApiSurface,
@@ -35,7 +38,7 @@ const DEFAULT_POOL_SYNC_INTERVAL_MS = 5000;
 const DEFAULT_RATE_LIMIT_COOLDOWN_MS = 60_000;
 const DEFAULT_SINGLE_ACCOUNT_RATE_LIMIT_COOLDOWN_MS = 8000;
 const DEFAULT_FAILURE_COOLDOWN_MS = 15_000;
-const DEFAULT_MAX_RETRY_ATTEMPTS = 3;
+const DEFAULT_MAX_RETRY_ATTEMPTS = Number.MAX_SAFE_INTEGER;
 const DEFAULT_TOKEN_REFRESH_BUFFER_SECONDS = 60;
 
 interface RuntimeEntry {
@@ -165,16 +168,53 @@ const modelCatalogToDescriptors = (
     vendor: model.vendor,
   }));
 
-const extractStatusCode = (error: unknown): number | null => {
-  const root = asRecord(error);
-  const response = asRecord(root?.response);
+const mergeModelDescriptors = (
+  merged: Map<string, RuntimeModelDescriptor>,
+  models: readonly RuntimeModelDescriptor[]
+): void => {
+  for (const model of models) {
+    const modelId = model.id.trim();
+    if (modelId.length === 0 || merged.has(modelId)) {
+      continue;
+    }
 
-  return (
-    readNumber(root?.statusCode) ??
-    readNumber(root?.status) ??
-    readNumber(response?.statusCode) ??
-    readNumber(response?.status)
-  );
+    merged.set(modelId, {
+      hidden: model.hidden ?? false,
+      id: modelId,
+      vendor: model.vendor?.trim() ?? "",
+    });
+  }
+};
+
+const extractStatusCode = (error: unknown): number | null => {
+  const visited = new Set<unknown>();
+  let current: unknown = error;
+
+  while (current !== null && current !== undefined && !visited.has(current)) {
+    visited.add(current);
+
+    const upstream = extractUpstreamErrorPayload(current);
+    if (upstream.statusCode !== null) {
+      return upstream.statusCode;
+    }
+
+    const root = asRecord(current);
+    const response = asRecord(root?.response);
+    const directStatus =
+      readNumber(root?.statusCode) ??
+      readNumber(root?.status) ??
+      readNumber(response?.statusCode) ??
+      readNumber(response?.status);
+    if (directStatus !== null) {
+      return directStatus;
+    }
+
+    current =
+      root?.cause ??
+      (current instanceof Error ? (current as Error & { cause?: unknown }).cause : undefined);
+  }
+
+  return null;
 };
 
 const headerValue = (headers: unknown, name: string): string | null => {
@@ -223,13 +263,27 @@ const headerValue = (headers: unknown, name: string): string | null => {
 };
 
 const extractRetryAfter = (error: unknown): string | null => {
-  const root = asRecord(error);
-  const response = asRecord(root?.response);
+  const visited = new Set<unknown>();
+  let current: unknown = error;
 
-  return (
-    headerValue(root?.headers, "retry-after") ??
-    headerValue(response?.headers, "retry-after")
-  );
+  while (current !== null && current !== undefined && !visited.has(current)) {
+    visited.add(current);
+
+    const root = asRecord(current);
+    const response = asRecord(root?.response);
+    const retryAfter =
+      headerValue(root?.headers, "retry-after") ??
+      headerValue(response?.headers, "retry-after");
+    if (retryAfter !== null) {
+      return retryAfter;
+    }
+
+    current =
+      root?.cause ??
+      (current instanceof Error ? (current as Error & { cause?: unknown }).cause : undefined);
+  }
+
+  return null;
 };
 
 const isInvalidOrExpiredTokenError = (error: unknown): boolean =>
@@ -721,6 +775,16 @@ export const makeProxyRuntime = (
       );
     }
 
+    if (statusCode === 402) {
+      return Effect.as(
+        cooldown(lease.entry, scheduler.rateLimitCooldownMs, message),
+        {
+          retryOtherAccount: true,
+          retrySameAccount: false,
+        } satisfies RetryDecision
+      );
+    }
+
     if (isTransientRequestError(error)) {
       return Effect.as(
         cooldown(lease.entry, scheduler.failureCooldownMs, message),
@@ -850,40 +914,45 @@ export const makeProxyRuntime = (
           model: normalizedModel(request.model),
         });
 
+        const attemptExit = yield* Effect.exit(request.operation({
+          account: lease.entry.account,
+          apiSurface,
+          attempt,
+          refreshed: lease.forceRefreshed,
+        }));
+
         try {
-          const result = yield* request.operation({
-            account: lease.entry.account,
-            apiSurface,
-            attempt,
-            refreshed: lease.forceRefreshed,
-          });
-          yield* markSuccess(lease.entry);
-          return result;
-        } catch (error) {
+          if (Exit.isSuccess(attemptExit)) {
+            yield* markSuccess(lease.entry);
+            return attemptExit.value;
+          }
+
+          const error = Cause.squash(attemptExit.cause);
           const decision = yield* handleRequestError(lease, error);
           lastError = error;
 
           if (decision.retrySameAccount && !lease.forceRefreshed) {
             lease.forceRefreshed = true;
-            try {
-              yield* forceRefreshEntry(lease.entry);
-              const retried = yield* request.operation({
-                account: lease.entry.account,
-                apiSurface,
-                attempt,
-                refreshed: true,
-              });
+            yield* forceRefreshEntry(lease.entry);
+            const retriedExit = yield* Effect.exit(request.operation({
+              account: lease.entry.account,
+              apiSurface,
+              attempt,
+              refreshed: true,
+            }));
+            if (Exit.isSuccess(retriedExit)) {
               yield* markSuccess(lease.entry);
-              return retried;
-            } catch (retryError) {
-              lastError = retryError;
-              const retryDecision = yield* handleRequestError(
-                lease,
-                retryError
-              );
-              if (!retryDecision.retryOtherAccount) {
-                return yield* Effect.fail(retryError);
-              }
+              return retriedExit.value;
+            }
+
+            const retryError = Cause.squash(retriedExit.cause);
+            lastError = retryError;
+            const retryDecision = yield* handleRequestError(
+              lease,
+              retryError
+            );
+            if (!retryDecision.retryOtherAccount) {
+              return yield* Effect.fail(retryError);
             }
           } else if (!decision.retryOtherAccount) {
             return yield* Effect.fail(error);
@@ -1173,21 +1242,36 @@ export const makeProxyRuntime = (
           );
         }
 
-        yield* syncAccounts({ force: true });
+        yield* syncAccounts();
+        const currentTime = nowDate();
         const merged = new Map<string, RuntimeModelDescriptor>();
+        const readyEntries = (yield* candidateEntries({
+          excludeAccountIds: new Set<string>(),
+        })).filter(
+          (entry) =>
+            !entry.removed &&
+            entry.account.enabled &&
+            !entry.account.reauthRequired &&
+            !cooldownActive(entry, currentTime)
+        );
 
+        for (const entry of readyEntries) {
+          mergeModelDescriptors(
+            merged,
+            modelCatalogToDescriptors(entry.account.modelCatalog)
+          );
+        }
+
+        if (merged.size > 0) {
+          const models = [...merged.values()];
+          routing.observeModels(models);
+          return models;
+        }
+
+        yield* syncAccounts({ force: true });
         for (const entry of yield* candidateEntries({
           excludeAccountIds: new Set<string>(),
         })) {
-          if (
-            entry.removed ||
-            !entry.account.enabled ||
-            entry.account.reauthRequired ||
-            cooldownActive(entry)
-          ) {
-            continue;
-          }
-
           try {
             yield* prepareEntry(entry, null);
             const models = yield* dependencies.hooks.listAccountModels({
@@ -1208,7 +1292,9 @@ export const makeProxyRuntime = (
               });
             }
           } catch (error) {
-            yield* handlePrepareError(entry, error);
+            yield* handlePrepareError(entry, error).pipe(
+              Effect.catch(() => Effect.void)
+            );
           }
         }
 

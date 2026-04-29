@@ -21,6 +21,7 @@ export interface AppConfigShape {
     readonly url: Redacted.Redacted;
   };
   readonly runtime: {
+    readonly defaultModel: string;
     readonly host: string;
     readonly idleTimeoutSeconds: number;
     readonly logLevel: string;
@@ -81,6 +82,10 @@ const configSchema = Config.all({
     url: Config.redacted("DATABASE_URL"),
   }),
   runtime: Config.all({
+    defaultModel: Config.string("COPILOTX_DEFAULT_MODEL").pipe(
+      Config.withDefault("gpt-5.3-codex"),
+      Config.map((value) => value.trim() || "gpt-5.3-codex")
+    ),
     host: Config.string("COPILOTX_HOST").pipe(Config.withDefault("127.0.0.1")),
     idleTimeoutSeconds: Config.int("COPILOTX_IDLE_TIMEOUT_SECONDS").pipe(
       Config.withDefault(0)

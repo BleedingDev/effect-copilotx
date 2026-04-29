@@ -45,6 +45,12 @@ const asModel = (body: Record<string, unknown>): string | null => {
   return trimmed.length > 0 ? trimmed : null;
 };
 
+const withDefaultModel = (
+  body: Record<string, unknown>,
+  defaultModel: string
+): Record<string, unknown> =>
+  asModel(body) === null ? { ...body, model: defaultModel } : body;
+
 const createClient = (config: AppConfigShape, account: AccountRecord) =>
   new CopilotClient(account.copilotToken, {
     apiBaseUrl: account.apiBaseUrl,
@@ -119,7 +125,10 @@ const anthropicMessagesRoute = HttpRouter.add("POST", "/v1/messages", (request) 
       return unauthorized;
     }
 
-    const body = yield* readJsonRecord(request);
+    const body = withDefaultModel(
+      yield* readJsonRecord(request),
+      config.runtime.defaultModel
+    );
     const repository = yield* AccountRepository;
     const runtime = yield* ProxyRuntimeService;
     const model = asModel(body);
