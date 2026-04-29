@@ -284,6 +284,37 @@ const buildResponsesExtraHeaders = (
   return headers;
 };
 
+const isCopilotResponsesTool = (tool: unknown): boolean =>
+  isRecord(tool) && tool.type === "function";
+
+const normalizeToolChoice = (
+  toolChoice: unknown,
+  tools: readonly unknown[] | undefined
+): unknown => {
+  if (!isRecord(toolChoice) || toolChoice.type !== "function") {
+    return toolChoice;
+  }
+
+  const functionName =
+    isRecord(toolChoice.function) && typeof toolChoice.function.name === "string"
+      ? toolChoice.function.name
+      : "";
+  if (
+    functionName.length > 0 &&
+    tools?.some(
+      (tool) =>
+        isRecord(tool) &&
+        tool.type === "function" &&
+        isRecord(tool.function) &&
+        tool.function.name === functionName
+    )
+  ) {
+    return toolChoice;
+  }
+
+  return "auto";
+};
+
 const prepareResponsesPayload = (
   payload: JsonRecord,
   stream: boolean
@@ -295,6 +326,12 @@ const prepareResponsesPayload = (
     nextPayload.stream = true;
   } else {
     delete nextPayload["stream"];
+  }
+
+  if (Array.isArray(nextPayload.tools)) {
+    const tools = nextPayload.tools.filter(isCopilotResponsesTool);
+    nextPayload.tools = tools;
+    nextPayload.tool_choice = normalizeToolChoice(nextPayload.tool_choice, tools);
   }
 
   delete nextPayload["service_tier"];
