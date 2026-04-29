@@ -84,14 +84,14 @@ for (const account of localAccounts) {
         Authorization: `Bearer ${remoteAdminApiKey}`,
         "Content-Type": "application/json",
       },
-    },
-    body: JSON.stringify({
-      enabled: account.enabled,
-      github_token: account.githubToken,
-      label: account.label,
-      priority: account.priority,
-    }),
-  });
+      body: JSON.stringify({
+        enabled: account.enabled,
+        github_token: account.githubToken,
+        label: account.label,
+        priority: account.priority,
+      }),
+    }
+  );
 
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
