@@ -290,8 +290,13 @@ const prepareResponsesPayload = (
 ): JsonRecord => {
   const nextPayload: JsonRecord = {
     ...payload,
-    ...(stream ? { stream: true } : {}),
   };
+  if (stream) {
+    nextPayload.stream = true;
+  } else {
+    delete nextPayload["stream"];
+  }
+
   delete nextPayload["service_tier"];
   return nextPayload;
 };

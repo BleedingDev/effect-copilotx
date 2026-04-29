@@ -519,8 +519,12 @@ const runConfigCommand = (options: ConfigOptions) =>
     const smallModel =
       options.smallModel?.trim() ||
       selectPreferredModel(modelIds, smallModelPreferences, "gpt-5-mini");
-    const codexModel = selectPreferredModel(modelIds, codexModelPreferences, "gpt-5.4");
-    const ompModel = selectPreferredModel(modelIds, ompModelPreferences, codexModel);
+    const codexModel =
+      options.model?.trim() ||
+      selectPreferredModel(modelIds, codexModelPreferences, "gpt-5.4");
+    const ompModel =
+      options.model?.trim() ||
+      selectPreferredModel(modelIds, ompModelPreferences, codexModel);
     const ompSmallModel =
       options.smallModel?.trim() ||
       selectPreferredModel(modelIds, ompSmallModelPreferences, "gpt-5-mini");
