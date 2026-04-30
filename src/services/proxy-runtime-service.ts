@@ -52,6 +52,7 @@ export class ProxyRuntimeService extends ServiceMap.Service<
         forcedModelIds: appConfig.security.forceModels,
         modelCacheTtlSeconds: appConfig.upstream.modelCacheTtlSeconds,
         requestTimeoutMs: appConfig.runtime.requestTimeoutMs,
+        streamFirstChunkTimeoutMs: appConfig.runtime.streamFirstChunkTimeoutMs,
       });
 
     return makeProxyRuntime({

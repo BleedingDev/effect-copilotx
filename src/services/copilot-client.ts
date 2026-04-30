@@ -6,6 +6,7 @@ import {
   COPILOT_RESPONSES_PATH,
   DEFAULT_MODEL_CACHE_TTL_SECONDS,
   DEFAULT_REQUEST_TIMEOUT_MS,
+  DEFAULT_STREAM_FIRST_CHUNK_TIMEOUT_MS,
 } from "#/config/copilot-constants";
 import { UpstreamHttpError } from "#/http/upstream-compat";
 
@@ -29,6 +30,7 @@ export interface CopilotClientOptions {
   readonly forcedModelIds?: readonly string[];
   readonly modelCacheTtlSeconds?: number;
   readonly requestTimeoutMs?: number;
+  readonly streamFirstChunkTimeoutMs?: number;
 }
 
 export interface CopilotRequestOptions {
@@ -232,16 +234,62 @@ const emptyUint8Stream =
     yield* [];
   };
 
+const timeoutError = (message: string): Error => {
+  const error = new Error(message);
+  error.name = "TimeoutError";
+  return error;
+};
+
+type StreamReadResult = Awaited<
+  ReturnType<ReadableStreamDefaultReader<Uint8Array>["read"]>
+>;
+
+const readStreamChunk = async (
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  timeoutMs: number
+): Promise<StreamReadResult> => {
+  if (timeoutMs <= 0) {
+    return await reader.read();
+  }
+
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => {
+        timeoutId = setTimeout(
+          () =>
+            reject(
+              timeoutError(
+                `Timed out waiting ${timeoutMs}ms for upstream stream to produce its first chunk.`
+              )
+            ),
+          timeoutMs
+        );
+      }),
+    ]);
+  } finally {
+    if (timeoutId !== undefined) {
+      clearTimeout(timeoutId);
+    }
+  }
+};
+
 const streamResponseLines = async function* streamResponseLinesGenerator(
-  body: ReadableStream<Uint8Array>
+  body: ReadableStream<Uint8Array>,
+  firstChunkTimeoutMs: number
 ): AsyncIterable<Uint8Array> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let firstRead = true;
 
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = firstRead
+        ? await readStreamChunk(reader, firstChunkTimeoutMs)
+        : await reader.read();
+      firstRead = false;
       if (done) {
         break;
       }
@@ -264,6 +312,9 @@ const streamResponseLines = async function* streamResponseLinesGenerator(
     if (buffer.length > 0) {
       yield textEncoder.encode(`${buffer.replace(/\r$/u, "")}\n`);
     }
+  } catch (error) {
+    await reader.cancel(error).catch(() => {});
+    throw error;
   } finally {
     reader.releaseLock();
   }
@@ -296,7 +347,8 @@ const normalizeToolChoice = (
   }
 
   const functionName =
-    isRecord(toolChoice.function) && typeof toolChoice.function.name === "string"
+    isRecord(toolChoice.function) &&
+    typeof toolChoice.function.name === "string"
       ? toolChoice.function.name
       : "";
   if (
@@ -331,14 +383,19 @@ const prepareResponsesPayload = (
   if (Array.isArray(nextPayload.tools)) {
     const tools = nextPayload.tools.filter(isCopilotResponsesTool);
     nextPayload.tools = tools;
-    nextPayload.tool_choice = normalizeToolChoice(nextPayload.tool_choice, tools);
+    nextPayload.tool_choice = normalizeToolChoice(
+      nextPayload.tool_choice,
+      tools
+    );
   }
 
   delete nextPayload["service_tier"];
   return nextPayload;
 };
 
-const prepareChatCompletionsStreamPayload = (payload: JsonRecord): JsonRecord => {
+const prepareChatCompletionsStreamPayload = (
+  payload: JsonRecord
+): JsonRecord => {
   const streamOptions = asJsonRecord(payload.stream_options) ?? {};
   return {
     ...payload,
@@ -355,6 +412,7 @@ export class CopilotClient {
   #modelsCache: readonly CopilotModelRecord[] | null = null;
   #modelsCacheTime = 0;
   readonly #requestTimeoutMs: number;
+  readonly #streamFirstChunkTimeoutMs: number;
   #token: string;
 
   constructor(copilotToken: string, options: CopilotClientOptions = {}) {
@@ -367,6 +425,9 @@ export class CopilotClient {
       (options.modelCacheTtlSeconds ?? DEFAULT_MODEL_CACHE_TTL_SECONDS) * 1000;
     this.#requestTimeoutMs =
       options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.#streamFirstChunkTimeoutMs =
+      options.streamFirstChunkTimeoutMs ??
+      DEFAULT_STREAM_FIRST_CHUNK_TIMEOUT_MS;
     this.#token = copilotToken;
   }
 
@@ -540,18 +601,46 @@ export class CopilotClient {
     }
   ): Promise<AsyncIterable<Uint8Array>> {
     const url = this.#buildUrl(path);
+    const openController =
+      this.#streamFirstChunkTimeoutMs > 0 ? new AbortController() : undefined;
     const requestInit: RequestInit = {
       body: JSON.stringify(options.body),
       headers: this.#buildHeaders(options.headers),
       method,
     };
 
-    const signal = mergeSignals(options.signal, this.#requestTimeoutMs);
+    const baseSignal = mergeSignals(options.signal, this.#requestTimeoutMs);
+    const signal =
+      openController === undefined
+        ? baseSignal
+        : baseSignal === undefined
+          ? openController.signal
+          : AbortSignal.any([baseSignal, openController.signal]);
     if (signal !== undefined) {
       requestInit.signal = signal;
     }
 
-    const response = await this.#fetch(url, requestInit);
+    let openTimeoutId: ReturnType<typeof setTimeout> | undefined;
+    const fetchPromise = this.#fetch(url, requestInit);
+    const response =
+      openController === undefined
+        ? await fetchPromise
+        : await Promise.race([
+            fetchPromise,
+            new Promise<never>((_, reject) => {
+              openTimeoutId = setTimeout(() => {
+                const error = timeoutError(
+                  `Timed out waiting ${this.#streamFirstChunkTimeoutMs}ms for upstream stream to open.`
+                );
+                openController.abort(error);
+                reject(error);
+              }, this.#streamFirstChunkTimeoutMs);
+            }),
+          ]).finally(() => {
+            if (openTimeoutId !== undefined) {
+              clearTimeout(openTimeoutId);
+            }
+          });
 
     if (!response.ok) {
       const responseText = await response.text();
@@ -569,7 +658,7 @@ export class CopilotClient {
       return emptyUint8Stream();
     }
 
-    return streamResponseLines(body);
+    return streamResponseLines(body, this.#streamFirstChunkTimeoutMs);
   }
 }
 

@@ -490,12 +490,10 @@ export const openAiChatToResponsesResponse = (
   return result;
 };
 
-export const openAiChatToResponsesEvents =
-  function* openAiChatToResponsesEvents(
-    response: JsonObject,
-    request: JsonObject
+const openAiResponseToResponsesEvents =
+  function* openAiResponseToResponsesEvents(
+    completed: Record<string, unknown>
   ): Generator<string> {
-    const completed = openAiChatToResponsesResponse(response, request);
     const inProgress = { ...completed, output: [], status: "in_progress" };
     let sequenceNumber = 0;
 
@@ -616,6 +614,27 @@ export const openAiChatToResponsesEvents =
       response: completed,
       sequence_number: sequenceNumber,
       type: "response.completed",
+    });
+  };
+
+export const openAiChatToResponsesEvents =
+  function* openAiChatToResponsesEvents(
+    response: JsonObject,
+    request: JsonObject
+  ): Generator<string> {
+    yield* openAiResponseToResponsesEvents(
+      openAiChatToResponsesResponse(response, request)
+    );
+  };
+
+export const openAiResponsesToResponsesEvents =
+  function* openAiResponsesToResponsesEvents(
+    response: JsonObject
+  ): Generator<string> {
+    yield* openAiResponseToResponsesEvents({
+      ...response,
+      object: "response",
+      status: "completed",
     });
   };
 
@@ -1091,4 +1110,5 @@ export interface ResponseTransformApi {
   readonly openAiResponsesToAnthropicResponse: typeof openAiResponsesToAnthropicResponse;
   readonly openAiResponsesToChatEvents: typeof openAiResponsesToChatEvents;
   readonly openAiResponsesToChatResponse: typeof openAiResponsesToChatResponse;
+  readonly openAiResponsesToResponsesEvents: typeof openAiResponsesToResponsesEvents;
 }

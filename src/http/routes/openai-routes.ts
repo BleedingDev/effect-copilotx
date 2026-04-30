@@ -2,7 +2,10 @@ import * as Effect from "effect/Effect";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as Stream from "effect/Stream";
 
-import type { AccountRecord, AccountUsageDelta } from "#/domain/accounts/account-types";
+import type {
+  AccountRecord,
+  AccountUsageDelta,
+} from "#/domain/accounts/account-types";
 import {
   CHAT_COMPLETIONS_API,
   RESPONSES_API,
@@ -20,13 +23,11 @@ import {
 import {
   extractUsageDelta,
   trackChatCompletionsStreamUsage,
-  trackResponsesStreamUsage,
 } from "#/http/usage-tracking";
 import {
   responsesRequestHasVisionInput,
   responsesRequestInitiator,
 } from "#/http/request-features";
-import { fixResponsesStream } from "#/http/responses-stream";
 import {
   openAiChatToResponsesRequest,
   openAiResponsesToChatRequest,
@@ -36,6 +37,7 @@ import {
   openAiChatToResponsesResponse,
   openAiResponsesToChatEvents,
   openAiResponsesToChatResponse,
+  openAiResponsesToResponsesEvents,
 } from "#/protocol/openai/response-transforms";
 import { authorizeRequest } from "#/http/http-helpers";
 import { AccountRepository } from "#/services/account-repository";
@@ -65,6 +67,7 @@ const createClient = (config: AppConfigShape, account: AccountRecord) =>
     forcedModelIds: config.security.forceModels,
     modelCacheTtlSeconds: config.upstream.modelCacheTtlSeconds,
     requestTimeoutMs: config.runtime.requestTimeoutMs,
+    streamFirstChunkTimeoutMs: config.runtime.streamFirstChunkTimeoutMs,
   });
 
 const prepareFailFastStream = <A>(stream: Stream.Stream<A, unknown>) =>
@@ -156,10 +159,15 @@ const chatCompletionsRoute = HttpRouter.add(
                 return Stream.unwrap(
                   Effect.tryPromise({
                     try: async () =>
-                      client.responses<Record<string, unknown>>(responsesRequest, {
-                        initiator: responsesRequestInitiator(responsesRequest),
-                        vision: responsesRequestHasVisionInput(responsesRequest),
-                      }),
+                      client.responses<Record<string, unknown>>(
+                        responsesRequest,
+                        {
+                          initiator:
+                            responsesRequestInitiator(responsesRequest),
+                          vision:
+                            responsesRequestHasVisionInput(responsesRequest),
+                        }
+                      ),
                     catch: toUnknownError,
                   }).pipe(
                     Effect.tap((response) =>
@@ -185,7 +193,11 @@ const chatCompletionsRoute = HttpRouter.add(
                   Effect.map((events) =>
                     byteStream(
                       trackChatCompletionsStreamUsage(events, (delta) =>
-                        persistUsagePromise(repository, account.accountId, delta)
+                        persistUsagePromise(
+                          repository,
+                          account.accountId,
+                          delta
+                        )
                       )
                     )
                   )
@@ -199,39 +211,48 @@ const chatCompletionsRoute = HttpRouter.add(
         return sseResponse(request, config, stream);
       }
 
-      return yield* runtime.execute({
-        allowUnsupportedSurfaceFallback: true,
-        model,
-        operation: ({ account, apiSurface }) =>
-          Effect.tryPromise({
-            try: async () => {
-              const client = createClient(config, account);
-              if (apiSurface === RESPONSES_API) {
-                const responsesRequest = openAiChatToResponsesRequest(body);
-                const result = await client.responses<Record<string, unknown>>(
-                  responsesRequest,
-                  {
+      return yield* runtime
+        .execute({
+          allowUnsupportedSurfaceFallback: true,
+          model,
+          operation: ({ account, apiSurface }) =>
+            Effect.tryPromise({
+              try: async () => {
+                const client = createClient(config, account);
+                if (apiSurface === RESPONSES_API) {
+                  const responsesRequest = openAiChatToResponsesRequest(body);
+                  const result = await client.responses<
+                    Record<string, unknown>
+                  >(responsesRequest, {
                     initiator: responsesRequestInitiator(responsesRequest),
                     vision: responsesRequestHasVisionInput(responsesRequest),
-                  }
-                );
-                return openAiResponsesToChatResponse(result);
-              }
+                  });
+                  return openAiResponsesToChatResponse(result);
+                }
 
-              return await client.chatCompletions<Record<string, unknown>>(body);
-            },
-            catch: toUnknownError,
-          }).pipe(
-            Effect.tap((response) =>
-              persistUsageEffect(repository, account.accountId, response, false)
-            )
-          ),
-        requestedApi: CHAT_COMPLETIONS_API,
-      }).pipe(
-        Effect.map((response) => jsonResponse(request, config, response)),
-        Effect.catch((error) =>
-          Effect.succeed(openAiErrorResponse(request, config, error)))
-      );
+                return await client.chatCompletions<Record<string, unknown>>(
+                  body
+                );
+              },
+              catch: toUnknownError,
+            }).pipe(
+              Effect.tap((response) =>
+                persistUsageEffect(
+                  repository,
+                  account.accountId,
+                  response,
+                  false
+                )
+              )
+            ),
+          requestedApi: CHAT_COMPLETIONS_API,
+        })
+        .pipe(
+          Effect.map((response) => jsonResponse(request, config, response)),
+          Effect.catch((error) =>
+            Effect.succeed(openAiErrorResponse(request, config, error))
+          )
+        );
     })
 );
 
@@ -252,96 +273,96 @@ const responsesRoute = HttpRouter.add("POST", "/v1/responses", (request) =>
     const model = asModel(body);
 
     if (body.stream === true) {
-      const stream = yield* prepareFailFastStream(
-        runtime.stream({
+      return yield* runtime
+        .execute({
           allowUnsupportedSurfaceFallback: true,
           model,
-          operation: ({ account, apiSurface }) => {
-            const client = createClient(config, account);
-            if (apiSurface === CHAT_COMPLETIONS_API) {
-              return Stream.unwrap(
-                Effect.tryPromise({
-                  try: async () => {
-                    const chatRequest = openAiResponsesToChatRequest(body);
-                    return client.chatCompletions<Record<string, unknown>>(chatRequest);
-                  },
-                  catch: toUnknownError,
-                }).pipe(
-                  Effect.tap((response) =>
-                    persistUsageEffect(
-                      repository,
-                      account.accountId,
-                      response,
-                      true
-                    )
-                  ),
-                  Effect.map((response) =>
-                    textEventStream(openAiChatToResponsesEvents(response, body))
-                  )
-                )
-              );
-            }
+          operation: ({ account, apiSurface }) =>
+            Effect.tryPromise({
+              try: async () => {
+                const client = createClient(config, account);
+                if (apiSurface === CHAT_COMPLETIONS_API) {
+                  const chatRequest = openAiResponsesToChatRequest(body);
+                  const response =
+                    await client.chatCompletions<Record<string, unknown>>(
+                      chatRequest
+                    );
+                  return {
+                    events: openAiChatToResponsesEvents(response, body),
+                    response,
+                  };
+                }
 
-            return Stream.unwrap(
-              Effect.tryPromise({
-                try: async () =>
-                  client.responsesStream(body, {
-                    initiator: responsesRequestInitiator(body),
-                    vision: responsesRequestHasVisionInput(body),
-                  }),
-                catch: toUnknownError,
-              }).pipe(
-                Effect.map((events) =>
-                  byteStream(
-                    fixResponsesStream(
-                      trackResponsesStreamUsage(events, (delta) =>
-                        persistUsagePromise(repository, account.accountId, delta)
-                      )
-                    )
-                  )
+                const response = await client.responses<
+                  Record<string, unknown>
+                >(body, {
+                  initiator: responsesRequestInitiator(body),
+                  vision: responsesRequestHasVisionInput(body),
+                });
+                return {
+                  events: openAiResponsesToResponsesEvents(response),
+                  response,
+                };
+              },
+              catch: toUnknownError,
+            }).pipe(
+              Effect.tap(({ response }) =>
+                persistUsageEffect(
+                  repository,
+                  account.accountId,
+                  response,
+                  true
                 )
               )
-            );
-          },
+            ),
           requestedApi: RESPONSES_API,
         })
-      );
-
-      return sseResponse(request, config, stream);
+        .pipe(
+          Effect.map(({ events }) =>
+            sseResponse(request, config, textEventStream(events))
+          ),
+          Effect.catch((error) =>
+            Effect.succeed(openAiErrorResponse(request, config, error))
+          )
+        );
     }
 
-    return yield* runtime.execute({
-      allowUnsupportedSurfaceFallback: true,
-      model,
-      operation: ({ account, apiSurface }) =>
-        Effect.tryPromise({
-          try: async () => {
-            const client = createClient(config, account);
-            if (apiSurface === CHAT_COMPLETIONS_API) {
-              const chatRequest = openAiResponsesToChatRequest(body);
-              const result = await client.chatCompletions<Record<string, unknown>>(
-                chatRequest
-              );
-              return openAiChatToResponsesResponse(result, body);
-            }
+    return yield* runtime
+      .execute({
+        allowUnsupportedSurfaceFallback: true,
+        model,
+        operation: ({ account, apiSurface }) =>
+          Effect.tryPromise({
+            try: async () => {
+              const client = createClient(config, account);
+              if (apiSurface === CHAT_COMPLETIONS_API) {
+                const chatRequest = openAiResponsesToChatRequest(body);
+                const result =
+                  await client.chatCompletions<Record<string, unknown>>(
+                    chatRequest
+                  );
+                return openAiChatToResponsesResponse(result, body);
+              }
 
-            return await client.responses<Record<string, unknown>>(body, {
-              initiator: responsesRequestInitiator(body),
-              vision: responsesRequestHasVisionInput(body),
-            });
-          },
-          catch: toUnknownError,
-        }).pipe(
-          Effect.tap((response) =>
-            persistUsageEffect(repository, account.accountId, response, false)
-          )
-        ),
-      requestedApi: RESPONSES_API,
-    }).pipe(
-      Effect.map((response) => jsonResponse(request, config, response)),
-      Effect.catch((error) =>
-        Effect.succeed(openAiErrorResponse(request, config, error)))
-    );
+              return await client.responses<Record<string, unknown>>(body, {
+                initiator: responsesRequestInitiator(body),
+                vision: responsesRequestHasVisionInput(body),
+              });
+            },
+            catch: toUnknownError,
+          }).pipe(
+            Effect.tap((response) =>
+              persistUsageEffect(repository, account.accountId, response, false)
+            )
+          ),
+        requestedApi: RESPONSES_API,
+      })
+      .pipe(
+        Effect.map((response) => jsonResponse(request, config, response)),
+        Effect.catch((error) =>
+          Effect.succeed(openAiErrorResponse(request, config, error))
+        )
+      );
   })
 );
 

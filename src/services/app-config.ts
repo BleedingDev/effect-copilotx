@@ -9,6 +9,7 @@ import {
   DEFAULT_DEVICE_CODE_TIMEOUT_SECONDS,
   DEFAULT_MODEL_CACHE_TTL_SECONDS,
   DEFAULT_REQUEST_TIMEOUT_MS,
+  DEFAULT_STREAM_FIRST_CHUNK_TIMEOUT_MS,
   DEFAULT_TOKEN_REFRESH_BUFFER_SECONDS,
 } from "#/config/copilot-constants";
 
@@ -27,6 +28,7 @@ export interface AppConfigShape {
     readonly logLevel: string;
     readonly port: number;
     readonly requestTimeoutMs: number;
+    readonly streamFirstChunkTimeoutMs: number;
   };
   readonly security: {
     readonly apiKey: string | undefined;
@@ -97,6 +99,9 @@ const configSchema = Config.all({
     requestTimeoutMs: Config.int("COPILOTX_REQUEST_TIMEOUT_MS").pipe(
       Config.withDefault(DEFAULT_REQUEST_TIMEOUT_MS)
     ),
+    streamFirstChunkTimeoutMs: Config.int(
+      "COPILOTX_STREAM_FIRST_CHUNK_TIMEOUT_MS"
+    ).pipe(Config.withDefault(DEFAULT_STREAM_FIRST_CHUNK_TIMEOUT_MS)),
   }),
   security: Config.all({
     apiKey: optionalString("COPILOTX_API_KEY"),

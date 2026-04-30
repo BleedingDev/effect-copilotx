@@ -2,7 +2,10 @@ import * as Effect from "effect/Effect";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as Stream from "effect/Stream";
 
-import type { AccountRecord, AccountUsageDelta } from "#/domain/accounts/account-types";
+import type {
+  AccountRecord,
+  AccountUsageDelta,
+} from "#/domain/accounts/account-types";
 import {
   CHAT_COMPLETIONS_API,
   RESPONSES_API,
@@ -57,6 +60,7 @@ const createClient = (config: AppConfigShape, account: AccountRecord) =>
     forcedModelIds: config.security.forceModels,
     modelCacheTtlSeconds: config.upstream.modelCacheTtlSeconds,
     requestTimeoutMs: config.runtime.requestTimeoutMs,
+    streamFirstChunkTimeoutMs: config.runtime.streamFirstChunkTimeoutMs,
   });
 
 const prepareFailFastStream = <A>(stream: Stream.Stream<A, unknown>) =>
@@ -90,7 +94,8 @@ const prepareFailFastStream = <A>(stream: Stream.Stream<A, unknown>) =>
     return Stream.fromAsyncIterable(wrapped, (error) => error);
   });
 
-const toUnknownError = (error: unknown) => new Error(describeError(error), { cause: error });
+const toUnknownError = (error: unknown) =>
+  new Error(describeError(error), { cause: error });
 
 const persistUsageEffect = (
   repository: {
@@ -117,116 +122,138 @@ const persistUsagePromise = async (
   await Effect.runPromise(repository.recordUsage(accountId, delta));
 };
 
-const anthropicMessagesRoute = HttpRouter.add("POST", "/v1/messages", (request) =>
-  Effect.gen(function* anthropicMessagesRoute() {
-    const config = yield* AppConfig;
-    const unauthorized = authorizeRequest(request, config);
-    if (unauthorized !== null) {
-      return unauthorized;
-    }
+const anthropicMessagesRoute = HttpRouter.add(
+  "POST",
+  "/v1/messages",
+  (request) =>
+    Effect.gen(function* anthropicMessagesRoute() {
+      const config = yield* AppConfig;
+      const unauthorized = authorizeRequest(request, config);
+      if (unauthorized !== null) {
+        return unauthorized;
+      }
 
-    const body = withDefaultModel(
-      yield* readJsonRecord(request),
-      config.runtime.defaultModel
-    );
-    const repository = yield* AccountRepository;
-    const runtime = yield* ProxyRuntimeService;
-    const model = asModel(body);
-    const openAiChatRequest = anthropicToOpenAiChatRequest(body);
-    const responsesRequest = anthropicToOpenAiResponsesRequest(body);
+      const body = withDefaultModel(
+        yield* readJsonRecord(request),
+        config.runtime.defaultModel
+      );
+      const repository = yield* AccountRepository;
+      const runtime = yield* ProxyRuntimeService;
+      const model = asModel(body);
+      const openAiChatRequest = anthropicToOpenAiChatRequest(body);
+      const responsesRequest = anthropicToOpenAiResponsesRequest(body);
 
-    if (body.stream === true) {
-      const stream = yield* prepareFailFastStream(
-        runtime.stream({
-          allowUnsupportedSurfaceFallback: true,
-          model,
-          operation: ({ account, apiSurface }) => {
-            const client = createClient(config, account);
-            if (apiSurface === RESPONSES_API) {
+      if (body.stream === true) {
+        const stream = yield* prepareFailFastStream(
+          runtime.stream({
+            allowUnsupportedSurfaceFallback: true,
+            model,
+            operation: ({ account, apiSurface }) => {
+              const client = createClient(config, account);
+              if (apiSurface === RESPONSES_API) {
+                return Stream.unwrap(
+                  Effect.tryPromise({
+                    try: async () =>
+                      client.responses<Record<string, unknown>>(
+                        responsesRequest,
+                        {
+                          initiator: "user",
+                          vision: false,
+                        }
+                      ),
+                    catch: toUnknownError,
+                  }).pipe(
+                    Effect.tap((response) =>
+                      persistUsageEffect(
+                        repository,
+                        account.accountId,
+                        response,
+                        true
+                      )
+                    ),
+                    Effect.map((response) =>
+                      textEventStream(
+                        openAiResponsesToAnthropicEvents(response, model ?? "")
+                      )
+                    )
+                  )
+                );
+              }
+
               return Stream.unwrap(
                 Effect.tryPromise({
                   try: async () =>
-                    client.responses<Record<string, unknown>>(responsesRequest, {
-                      initiator: "user",
-                      vision: false,
-                    }),
+                    client.chatCompletionsStream(openAiChatRequest),
                   catch: toUnknownError,
                 }).pipe(
-                  Effect.tap((response) =>
-                    persistUsageEffect(
-                      repository,
-                      account.accountId,
-                      response,
-                      true
-                    )
-                  ),
-                  Effect.map((response) =>
-                    textEventStream(
-                      openAiResponsesToAnthropicEvents(response, model ?? "")
+                  Effect.map((events) =>
+                    asyncTextEventStream(
+                      openAiChatStreamToAnthropicEvents(
+                        trackChatCompletionsStreamUsage(events, (delta) =>
+                          persistUsagePromise(
+                            repository,
+                            account.accountId,
+                            delta
+                          )
+                        ),
+                        model ?? ""
+                      )
                     )
                   )
                 )
               );
-            }
+            },
+            requestedApi: CHAT_COMPLETIONS_API,
+          })
+        );
 
-            return Stream.unwrap(
-              Effect.tryPromise({
-                try: async () => client.chatCompletionsStream(openAiChatRequest),
-                catch: toUnknownError,
-              }).pipe(
-                Effect.map((events) =>
-                  asyncTextEventStream(
-                    openAiChatStreamToAnthropicEvents(
-                      trackChatCompletionsStreamUsage(events, (delta) =>
-                        persistUsagePromise(repository, account.accountId, delta)
-                      ),
-                      model ?? ""
-                    )
-                  )
+        return sseResponse(request, config, stream);
+      }
+
+      return yield* runtime
+        .execute({
+          allowUnsupportedSurfaceFallback: true,
+          model,
+          operation: ({ account, apiSurface }) =>
+            Effect.tryPromise({
+              try: async () => {
+                const client = createClient(config, account);
+                if (apiSurface === RESPONSES_API) {
+                  const result = await client.responses<
+                    Record<string, unknown>
+                  >(responsesRequest, { initiator: "user", vision: false });
+                  return openAiResponsesToAnthropicResponse(
+                    result,
+                    model ?? ""
+                  );
+                }
+
+                const result =
+                  await client.chatCompletions<Record<string, unknown>>(
+                    openAiChatRequest
+                  );
+                return openAiChatToAnthropicResponse(result, model ?? "");
+              },
+              catch: toUnknownError,
+            }).pipe(
+              Effect.tap((response) =>
+                persistUsageEffect(
+                  repository,
+                  account.accountId,
+                  response,
+                  false
                 )
               )
-            );
-          },
+            ),
           requestedApi: CHAT_COMPLETIONS_API,
         })
-      );
-
-      return sseResponse(request, config, stream);
-    }
-
-    return yield* runtime.execute({
-      allowUnsupportedSurfaceFallback: true,
-      model,
-      operation: ({ account, apiSurface }) =>
-        Effect.tryPromise({
-          try: async () => {
-            const client = createClient(config, account);
-            if (apiSurface === RESPONSES_API) {
-              const result = await client.responses<Record<string, unknown>>(
-                responsesRequest,
-                { initiator: "user", vision: false }
-              );
-              return openAiResponsesToAnthropicResponse(result, model ?? "");
-            }
-
-            const result = await client.chatCompletions<Record<string, unknown>>(
-              openAiChatRequest
-            );
-            return openAiChatToAnthropicResponse(result, model ?? "");
-          },
-          catch: toUnknownError,
-        }).pipe(
-          Effect.tap((response) =>
-            persistUsageEffect(repository, account.accountId, response, false)
+        .pipe(
+          Effect.map((response) => jsonResponse(request, config, response)),
+          Effect.catch((error) =>
+            Effect.succeed(anthropicErrorResponse(request, config, error))
           )
-        ),
-      requestedApi: CHAT_COMPLETIONS_API,
-    }).pipe(
-      Effect.map((response) => jsonResponse(request, config, response)),
-      Effect.catch((error) =>
-        Effect.succeed(anthropicErrorResponse(request, config, error)))
-    );
-  })
+        );
+    })
 );
 
 export const anthropicRoutes = [anthropicMessagesRoute] as const;
